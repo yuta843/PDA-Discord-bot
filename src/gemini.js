@@ -1,8 +1,13 @@
 const DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite";
-const MAX_PROMPT_LENGTH = 2000;
 const MAX_REPLY_LENGTH = 80;
 
 import { buildAiSystemInstruction, getAiLengthConfig } from "./ai-settings.js";
+import {
+  buildUntrustedHistory,
+  buildUntrustedUserPrompt,
+  isPersonaOverridePrompt,
+  PERSONA_OVERRIDE_MESSAGE,
+} from "./prompt-guard.js";
 
 class GeminiApiError extends Error {
   constructor(message, { status, code } = {}) {
@@ -27,6 +32,9 @@ const EXPLICIT_SEXUAL_PATTERN =
   /(?:ポルノ|エロ画像|エロ小説|性的描写|露骨な下ネタ|性行為.{0,12}(?:描写|書いて|作って)|(?:porn|hentai|explicit sex|sexual roleplay|write.{0,12}sex))/i;
 
 function moderatePrompt(prompt) {
+  if (isPersonaOverridePrompt(prompt)) {
+    return { allowed: false, code: "PERSONA_OVERRIDE", message: PERSONA_OVERRIDE_MESSAGE };
+  }
   if (CHILD_SEXUAL_PATTERN.test(prompt)) {
     return { allowed: false, message: "未成年の性的内容には対応できません。" };
   }
@@ -84,6 +92,7 @@ async function generateShortReply(
     history = [],
     onUsage,
     settings = {},
+    taskInstruction = "",
     fetchImpl = fetch,
   } = {},
 ) {
@@ -103,20 +112,18 @@ async function generateShortReply(
         systemInstruction: {
           parts: [
             {
-              text: buildAiSystemInstruction(settings),
+              text: buildAiSystemInstruction(settings, { taskInstruction }),
             },
           ],
         },
         contents: [
-          ...history
-            .filter(({ content }) => content?.trim())
-            .map(({ role, content }) => ({
-              role: role === "assistant" ? "model" : "user",
-              parts: [{ text: content.trim().slice(0, MAX_PROMPT_LENGTH) }],
-            })),
+          ...buildUntrustedHistory(history).map(({ role, content }) => ({
+            role: role === "assistant" ? "model" : "user",
+            parts: [{ text: content }],
+          })),
           {
             role: "user",
-            parts: [{ text: prompt.trim().slice(0, MAX_PROMPT_LENGTH) }],
+            parts: [{ text: buildUntrustedUserPrompt(prompt) }],
           },
         ],
         generationConfig: {

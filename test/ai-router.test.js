@@ -93,3 +93,134 @@ test("passes AI settings to the selected provider", async () => {
 
   assert.deepEqual(receivedSettings, { length: "normal", language: "ja", style: "polite" });
 });
+
+test("uses Groq as the configured primary provider", async () => {
+  const tracker = new GeminiUsageTracker();
+  const result = await generateAiReply("test", {
+    geminiApiKey: "gemini",
+    groqApiKey: "groq",
+    preferredProvider: "groq",
+    tracker,
+    geminiGenerator: async () => assert.fail("Gemini should not be called"),
+    groqGenerator: async () => "groq-primary",
+  });
+
+  assert.equal(result.provider, "groq");
+  assert.equal(result.reason, "configured-primary");
+});
+
+test("falls back from Qwen to GPT-OSS 120B", async () => {
+  const tracker = new GeminiUsageTracker();
+  const calledModels = [];
+  const result = await generateAiReply("test", {
+    groqApiKey: "groq",
+    groqModel: "qwen/qwen3.6-27b",
+    groqFallbackModel: "openai/gpt-oss-120b",
+    preferredProvider: "groq",
+    tracker,
+    groqGenerator: async (_prompt, options) => {
+      calledModels.push(options.model);
+      if (options.model === "qwen/qwen3.6-27b") throw new Error("Qwen unavailable");
+      return "gpt-oss fallback";
+    },
+  });
+
+  assert.deepEqual(calledModels, ["qwen/qwen3.6-27b", "openai/gpt-oss-120b"]);
+  assert.equal(result.text, "gpt-oss fallback");
+  assert.equal(result.model, "openai/gpt-oss-120b");
+  assert.equal(result.reason, "groq-model-fallback");
+});
+
+test("uses Qwen before GPT-OSS when Gemini is unavailable", async () => {
+  const tracker = new GeminiUsageTracker();
+  const calledModels = [];
+  const result = await generateAiReply("test", {
+    geminiApiKey: "gemini",
+    groqApiKey: "groq",
+    qwenModel: "qwen/qwen3.6-27b",
+    groqFallbackModel: "openai/gpt-oss-120b",
+    tracker,
+    geminiGenerator: async () => {
+      throw new GeminiApiError("quota", { status: 429 });
+    },
+    groqGenerator: async (_prompt, options) => {
+      calledModels.push(options.model);
+      if (options.model === "qwen/qwen3.6-27b") throw new Error("Qwen unavailable");
+      return "gpt-oss fallback";
+    },
+  });
+
+  assert.deepEqual(calledModels, ["qwen/qwen3.6-27b", "openai/gpt-oss-120b"]);
+  assert.equal(result.model, "openai/gpt-oss-120b");
+  assert.equal(result.reason, "gemini-limit");
+});
+
+test("uses OpenAI as the configured primary provider", async () => {
+  const tracker = new GeminiUsageTracker();
+  const result = await generateAiReply("test", {
+    openaiApiKey: "openai",
+    openaiModel: "gpt-test",
+    preferredProvider: "openai",
+    tracker,
+    openaiGenerator: async (_prompt, options) => {
+      assert.equal(options.model, "gpt-test");
+      return "openai-primary";
+    },
+  });
+
+  assert.equal(result.provider, "openai");
+  assert.equal(result.reason, "configured-primary");
+});
+
+test("prefers ChatGPT Codex OAuth over an OpenAI API key", async () => {
+  const tracker = new GeminiUsageTracker();
+  const result = await generateAiReply("test", {
+    openaiApiKey: "must-not-be-used",
+    openaiOAuthAvailable: true,
+    preferredProvider: "openai",
+    tracker,
+    openaiGenerator: async () => assert.fail("API key route should not be called"),
+    codexOAuthGenerator: async (_prompt, options) => {
+      assert.equal(options.model, undefined);
+      return "oauth-primary";
+    },
+  });
+
+  assert.equal(result.text, "oauth-primary");
+  assert.equal(result.provider, "openai");
+  assert.equal(result.reason, "codex-oauth");
+});
+
+test("prefers Groq after reaching the Gemini daily token limit", async () => {
+  const tracker = new GeminiUsageTracker({ dailyTokenLimit: 100 });
+  tracker.recordGeminiUsage({ totalTokens: 100 }, 1000);
+
+  const result = await generateAiReply("test", {
+    geminiApiKey: "gemini",
+    groqApiKey: "groq",
+    tracker,
+    now: 2000,
+    geminiGenerator: async () => assert.fail("Gemini should not be called"),
+    groqGenerator: async () => "fallback",
+  });
+
+  assert.equal(result.provider, "groq");
+  assert.equal(result.reason, "gemini-soft-limit");
+});
+
+test("passes the trusted application task to the selected provider", async () => {
+  const tracker = new GeminiUsageTracker();
+  let receivedTaskInstruction;
+
+  await generateAiReply("test", {
+    geminiApiKey: "gemini",
+    tracker,
+    taskInstruction: "Only perform the server-defined task.",
+    geminiGenerator: async (_prompt, options) => {
+      receivedTaskInstruction = options.taskInstruction;
+      return "reply";
+    },
+  });
+
+  assert.equal(receivedTaskInstruction, "Only perform the server-defined task.");
+});

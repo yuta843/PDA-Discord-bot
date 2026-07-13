@@ -1,5 +1,6 @@
 import { shortenReply } from "./gemini.js";
 import { buildAiSystemInstruction, getAiLengthConfig } from "./ai-settings.js";
+import { buildUntrustedHistory, buildUntrustedUserPrompt } from "./prompt-guard.js";
 
 const DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b";
 
@@ -23,48 +24,60 @@ async function generateGroqShortReply(
     model = DEFAULT_GROQ_MODEL,
     history = [],
     settings = {},
+    taskInstruction = "",
     fetchImpl = fetch,
   } = {},
 ) {
   if (!apiKey) throw new Error("GROQ_API_KEY is not configured.");
   const lengthConfig = getAiLengthConfig(settings);
-
-  const response = await fetchImpl("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
+  const isGptOss = model.startsWith("openai/gpt-oss-");
+  const isQwen36 = model === "qwen/qwen3.6-27b";
+  const messages = [
+    {
+      role: "system",
+      content: buildAiSystemInstruction(settings, { taskInstruction }),
     },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "system",
-          content: buildAiSystemInstruction(settings),
-        },
-        ...history
-          .filter(({ content }) => content?.trim())
-          .map(({ role, content }) => ({
-            role: role === "assistant" ? "assistant" : "user",
-            content: content.trim().slice(0, 2000),
-          })),
-        { role: "user", content: prompt.trim().slice(0, 2000) },
-      ],
-      temperature: 0.6,
-      max_tokens: lengthConfig.maxOutputTokens,
-    }),
-    signal: AbortSignal.timeout(20_000),
-  });
+    ...buildUntrustedHistory(history),
+    { role: "user", content: buildUntrustedUserPrompt(prompt) },
+  ];
 
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new GroqApiError(data.error?.message ?? `Groq API request failed (${response.status}).`, {
-      status: response.status,
-      code: data.error?.code,
+  const requestCompletion = async (maxCompletionTokens) => {
+    const response = await fetchImpl("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+      model,
+      messages,
+      temperature: isQwen36 ? 0.7 : 0.6,
+      max_completion_tokens: maxCompletionTokens,
+      ...(isGptOss ? { reasoning_effort: "low" } : {}),
+      ...(isQwen36 ? { reasoning_effort: "none", top_p: 0.8 } : {}),
+      }),
+      signal: AbortSignal.timeout(20_000),
     });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new GroqApiError(data.error?.message ?? `Groq API request failed (${response.status}).`, {
+        status: response.status,
+        code: data.error?.code,
+      });
+    }
+    return data;
+  };
+
+  const initialMaxTokens = Math.max(lengthConfig.maxOutputTokens * 4, 512);
+  let data = await requestCompletion(initialMaxTokens);
+  let content = data.choices?.[0]?.message?.content;
+  if (!content?.trim() && data.choices?.[0]?.finish_reason === "length") {
+    data = await requestCompletion(Math.min(initialMaxTokens * 2, 4096));
+    content = data.choices?.[0]?.message?.content;
   }
 
-  const reply = shortenReply(data.choices?.[0]?.message?.content, lengthConfig.maxReplyLength, {
+  const reply = shortenReply(content, lengthConfig.maxReplyLength, {
     preserveLineBreaks: settings?.style === "bullet",
   });
   if (!reply) throw new Error("Groq returned an empty response.");

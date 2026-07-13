@@ -1,6 +1,11 @@
 import "dotenv/config";
 import { readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   Client,
   Events,
   GatewayIntentBits,
@@ -24,16 +29,74 @@ import {
 } from "./gemini.js";
 import { GeminiUsageTracker, generateAiReply } from "./ai-router.js";
 import { DEFAULT_GROQ_MODEL, isGroqLimitError } from "./groq.js";
+import {
+  DEFAULT_OPENAI_MODEL,
+  isOpenAiLimitError,
+  isOpenAiUnavailableError,
+} from "./openai.js";
+import { DEFAULT_CODEX_MODEL, isCodexOAuthAvailable } from "./codex-oauth.js";
+import { ImageAccessLimiter } from "./image-access.js";
+import { enrichPromptWithTweets } from "./tweet-context.js";
+import { enrichPromptWithWebPages } from "./web-fetch.js";
+import {
+  AiBattleStore,
+  BATTLE_START_USER_ID,
+  BATTLE_TARGET_BOT_ID,
+  buildBattlePrompt,
+} from "./ai-battle.js";
+import {
+  AI_MODEL_LABELS,
+  canSelectModel,
+  loadSelectedProvider,
+  saveSelectedProvider,
+} from "./model-selection.js";
 import { buildServerInviteUrl } from "./invite.js";
 import { getImageAssets, isQuoteBotAuthor, shouldRelay } from "./relay.js";
 import { launchWindowsSleepHelper, scheduleSystemSleep } from "./system-sleep.js";
 import { ConversationHistory } from "./conversation-history.js";
+import {
+  DEFAULT_CHANNEL_HISTORY_LIMIT,
+  fetchChannelMessageHistory,
+} from "./channel-history.js";
 import { AI_SETTING_LABELS, AiSettingsStore } from "./ai-settings.js";
+import {
+  canChangeAiSettings,
+  parseAiSettingsAllowedUserIds,
+} from "./ai-settings-access.js";
 import { AnkSessionStore, parseAnkCommand } from "./ank.js";
 import { formatGachaResult, parseGachaCommand, rollGacha } from "./gacha.js";
-import { selectActiveMessages } from "./auto-reaction.js";
+import { buildHelpMessage } from "./help.js";
+import { buildAhooNewsPrompt, formatAhooNewsReply } from "./ahoo-news.js";
+import { parsePersonaSwitchCommand } from "./personas.js";
+import {
+  cleanKimazuMessageText,
+  createKimazuImage,
+  downloadImage,
+  isKimazuMentionCommand,
+} from "./kimazu.js";
+import { AHOO_NEWS_TASK_INSTRUCTION, SUMMARY_TASK_INSTRUCTION } from "./ai-task-instructions.js";
+import { CommunityStore } from "./community-store.js";
+import {
+  castPollVote,
+  closePoll,
+  createPoll,
+  formatPollContent,
+  isPollExpired,
+} from "./poll.js";
+import {
+  MAX_ACTIVE_REMINDERS_PER_USER,
+  createReminder,
+  parseReminderMinutes,
+  sortReminders,
+} from "./reminders.js";
+import {
+  buildSummaryPrompt,
+  DEFAULT_SUMMARY_COUNT,
+  parseSummaryCount,
+} from "./summary.js";
 
 const DEFAULT_QUOTE_BOT_ID = "949479338275913799";
+const QWEN_GROQ_MODEL = "qwen/qwen3.6-27b";
 
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
@@ -58,6 +121,19 @@ const geminiApiKey = process.env.GEMINI_API_KEY?.trim();
 const geminiModel = process.env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
 const groqApiKey = process.env.GROQ_API_KEY?.trim();
 const groqModel = process.env.GROQ_MODEL?.trim() || DEFAULT_GROQ_MODEL;
+const openaiApiKey = process.env.OPENAI_API_KEY?.trim();
+const codexOAuthAvailable = isCodexOAuthAvailable();
+const openaiModel = codexOAuthAvailable
+  ? process.env.CODEX_MODEL?.trim() || DEFAULT_CODEX_MODEL
+  : process.env.OPENAI_MODEL?.trim() || DEFAULT_OPENAI_MODEL;
+const configuredAiProvider = ["gemini", "groq", "openai"].includes(
+  process.env.AI_PROVIDER?.trim().toLowerCase(),
+)
+  ? process.env.AI_PROVIDER.trim().toLowerCase()
+  : "gemini";
+const aiSettingsAllowedUserIds = parseAiSettingsAllowedUserIds(
+  process.env.AI_SETTINGS_ALLOWED_USER_IDS,
+);
 const geminiSoftRpm = Number.parseInt(process.env.GEMINI_SOFT_RPM ?? "8", 10);
 const geminiSoftTpm = Number.parseInt(process.env.GEMINI_SOFT_TPM ?? "", 10);
 const geminiDailyRequestLimit = Number.parseInt(
@@ -71,28 +147,27 @@ const geminiFallbackMinutes = Number.parseInt(
 );
 const systemSleepEnabled = process.env.SYSTEM_SLEEP_ENABLED === "true";
 const systemSleepTime = process.env.SYSTEM_SLEEP_TIME?.trim() || "01:00";
-const autoReactionEnabled = process.env.AUTO_REACTION_ENABLED !== "false";
-const autoReactionIntervalMs = Math.max(
-  Number.parseInt(process.env.AUTO_REACTION_INTERVAL_SECONDS ?? "120", 10) || 120,
-  120,
-) * 1000;
-const autoReactionActivityWindowMs = Math.max(
-  Number.parseInt(process.env.AUTO_REACTION_ACTIVITY_WINDOW_SECONDS ?? "60", 10) || 60,
-  1,
-) * 1000;
-const autoReactionMinActivity = Math.max(
-  Number.parseInt(process.env.AUTO_REACTION_MIN_ACTIVITY ?? "5", 10) || 5,
-  1,
-);
-const autoReactionBatchSize = Math.max(
-  Number.parseInt(process.env.AUTO_REACTION_BATCH_SIZE ?? "3", 10) || 3,
-  1,
-);
-const autoReactionEmojis = parseIdList(
-  process.env.AUTO_REACTION_EMOJIS ?? "👍,😂,😮,🤔,🔥",
-);
-
 const targetOverridesPath = new URL("../target-overrides.json", import.meta.url);
+const communityDataPath = fileURLToPath(new URL("../community-data.json", import.meta.url));
+const modelSelectionPath = fileURLToPath(new URL("../ai-model-selection.json", import.meta.url));
+let activeAiProvider = loadSelectedProvider(modelSelectionPath, configuredAiProvider);
+
+function isProviderAvailable(provider) {
+  return {
+    gemini: Boolean(geminiApiKey),
+    groq: Boolean(groqApiKey),
+    qwen: Boolean(groqApiKey),
+    openai: codexOAuthAvailable || Boolean(openaiApiKey),
+  }[provider] ?? false;
+}
+
+function getActiveProvider() {
+  return activeAiProvider === "qwen" ? "groq" : activeAiProvider;
+}
+
+function getActiveGroqModel() {
+  return activeAiProvider === "qwen" ? QWEN_GROQ_MODEL : groqModel;
+}
 
 function loadTargetOverrides() {
   try {
@@ -108,6 +183,7 @@ function saveTargetOverrides() {
 }
 
 const targetOverrides = loadTargetOverrides();
+const communityStore = new CommunityStore({ filePath: communityDataPath });
 
 function getTargetChannelId(guildId) {
   return targetOverrides[guildId] ?? defaultTargetChannelId;
@@ -124,11 +200,11 @@ const client = new Client({
 
 const processedMessages = new Set();
 const geminiCooldowns = new Map();
+const imageAccessLimiter = new ImageAccessLimiter();
 const aiConversationHistory = new ConversationHistory({ maxTurns: 5 });
 const aiSettingsStore = new AiSettingsStore();
 const ankSessions = new AnkSessionStore();
-const autoReactionMessages = new Map();
-let autoReactionTimer = null;
+const aiBattles = new AiBattleStore();
 const geminiUsageTracker = new GeminiUsageTracker({
   softRequestsPerMinute: Number.isFinite(geminiSoftRpm) && geminiSoftRpm > 0 ? geminiSoftRpm : 8,
   softTokensPerMinute:
@@ -147,62 +223,16 @@ const geminiUsageTracker = new GeminiUsageTracker({
       : 15,
 });
 
+const DEFAULT_POLL_DURATION_MINUTES = 60;
+const COMMUNITY_TIMER_INTERVAL_MS = 15_000;
+let communityTimer = null;
+
 function getAiConversationKey({ guildId, channelId, userId }) {
   return [guildId ?? "dm", channelId, userId].join(":");
 }
 
 function getAiSettingsKey({ guildId }) {
   return guildId ?? "dm";
-}
-
-function rememberAutoReactionMessage(message) {
-  if (
-    !autoReactionEnabled ||
-    message.author?.bot ||
-    !message.guild ||
-    !message.channel?.isTextBased?.() ||
-    !message.content?.trim()
-  ) {
-    return;
-  }
-
-  autoReactionMessages.set(message.id, {
-    message,
-    createdAt: Date.now(),
-  });
-  while (autoReactionMessages.size > 300) {
-    autoReactionMessages.delete(autoReactionMessages.keys().next().value);
-  }
-}
-
-async function autoReactToRandomMessage() {
-  if (!autoReactionEnabled || !autoReactionEmojis.length) return;
-
-  const now = Date.now();
-  const cutoff = now - autoReactionActivityWindowMs;
-  for (const [messageId, entry] of autoReactionMessages) {
-    if (entry.createdAt < cutoff) {
-      autoReactionMessages.delete(messageId);
-    }
-  }
-
-  const selectedMessages = selectActiveMessages(autoReactionMessages, {
-    count: autoReactionBatchSize,
-    now,
-    windowMs: autoReactionActivityWindowMs,
-    minActivity: autoReactionMinActivity,
-  });
-  for (const selected of selectedMessages) {
-    const emoji = autoReactionEmojis[Math.floor(Math.random() * autoReactionEmojis.length)];
-    try {
-      await selected.message.react(emoji);
-      console.log(`[reaction] emoji=${emoji} message=${selected.message.id}`);
-    } catch (error) {
-      console.error(`[reaction] Failed for message ${selected.message.id}:`, error.message);
-    } finally {
-      autoReactionMessages.delete(selected.message.id);
-    }
-  }
 }
 
 function getInteractionConversationKey(interaction) {
@@ -243,11 +273,39 @@ function formatSettings(settings) {
   ].join(" / ");
 }
 
+async function handlePersonaSwitchCommand(message, persona) {
+  if (
+    !canChangeAiSettings(message.author.id, aiSettingsAllowedUserIds, {
+      canManageGuild: message.member?.permissions.has(PermissionFlagsBits.ManageGuild) ?? false,
+    })
+  ) {
+    await message.reply({
+      content: "AI設定を変更する権限がありません。",
+      allowedMentions: { repliedUser: false, parse: [] },
+    });
+    return true;
+  }
+
+  const settings = aiSettingsStore.set(getAiSettingsKey(message), "style", persona);
+  await message.reply({
+    content: `このサーバーのAI文体を ${AI_SETTING_LABELS.style[settings.style]} に切り替えました。` +
+      " 次回のAI応答から適用します。",
+    allowedMentions: { repliedUser: false, parse: [] },
+  });
+  return true;
+}
+
 function formatStatus(interaction) {
   const key = getInteractionConversationKey(interaction);
   const usage = geminiUsageTracker.getRateLimitStatus();
   const settings = aiSettingsStore.get(getAiSettingsKey(interaction));
-  const provider = usage.fallbackActive
+  const provider = activeAiProvider === "qwen" && groqApiKey
+    ? `Groq（${QWEN_GROQ_MODEL}）`
+    : activeAiProvider === "openai" && (codexOAuthAvailable || openaiApiKey)
+    ? `OpenAI（${codexOAuthAvailable ? "ChatGPT/Codex OAuth" : openaiModel ?? DEFAULT_OPENAI_MODEL}）`
+    : activeAiProvider === "groq" && groqApiKey
+    ? `Groq（${groqModel}）`
+    : usage.fallbackActive
     ? "Groq（Geminiフォールバック中）"
     : geminiApiKey
       ? `Gemini（${geminiModel}）`
@@ -256,7 +314,7 @@ function formatStatus(interaction) {
         : "未設定";
 
   return [
-    `AI状態: ${geminiApiKey || groqApiKey ? "利用可能" : "APIキー未設定"}`,
+    `AI状態: ${geminiApiKey || groqApiKey || codexOAuthAvailable || openaiApiKey ? "利用可能" : "認証未設定"}`,
     `使用プロバイダー: ${provider}`,
     `コンテキスト: ${aiConversationHistory.getTurnCount(key)}/5往復`,
     `設定: ${formatSettings(settings)}`,
@@ -268,6 +326,74 @@ function formatStatus(interaction) {
       ? `Gemini RPD: ${usage.dailyRequestsUsed}回 使用（上限未設定）`
       : `Gemini RPD: ${usage.dailyRequestsRemaining}/${usage.dailyRequestLimit}回 残り`,
   ].join("\n");
+}
+
+function buildPollComponents(poll, disabled = false) {
+  return [
+    new ActionRowBuilder().addComponents(
+      poll.options.map((_, index) =>
+        new ButtonBuilder()
+          .setCustomId(`poll:${poll.id}:${index}`)
+          .setLabel(String(index + 1))
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(disabled),
+      ),
+    ),
+  ];
+}
+
+async function updatePollMessage(poll) {
+  const channel = await client.channels.fetch(poll.channelId);
+  if (!channel?.isTextBased?.() || typeof channel.messages?.fetch !== "function") {
+    throw new Error(`Poll channel is not readable: ${poll.channelId}`);
+  }
+  const message = await channel.messages.fetch(poll.messageId);
+  await message.edit({
+    content: formatPollContent(poll),
+    components: buildPollComponents(poll, poll.status !== "active"),
+  });
+}
+
+function formatCounter(value) {
+  return Number(value ?? 0).toLocaleString("ja-JP");
+}
+
+function formatCommunityStats(stats, { isUser = false, activePolls = 0 } = {}) {
+  const counters = stats.user ?? stats.totals;
+  return [
+    `📈 ${isUser ? "あなたの統計" : "サーバー統計"}`,
+    `メッセージ: ${formatCounter(counters.messages)}`,
+    `画像リレー: ${formatCounter(counters.relays)}回 / ${formatCounter(counters.relayedImages)}枚`,
+    `AI回答: ${formatCounter(counters.aiReplies)}回`,
+    `ガチャ: ${formatCounter(counters.gachaPulls)}回`,
+    `投票: ${formatCounter(counters.pollVotes)}票`,
+    `リマインダー作成: ${formatCounter(counters.remindersCreated)}件`,
+    ...(isUser ? [] : [`進行中の投票: ${formatCounter(activePolls)}件`]),
+  ].join("\n");
+}
+
+function formatReminderList(reminders) {
+  const sorted = sortReminders(reminders);
+  if (!sorted.length) return "リマインダーはありません。";
+  return [
+    "⏰ あなたのリマインダー",
+    ...sorted.map(
+      (reminder) =>
+        `・\`${reminder.id}\` <t:${Math.floor(reminder.dueAt / 1000)}:R> ${reminder.text}`,
+    ),
+  ].join("\n").slice(0, 1900);
+}
+
+function formatQuoteHistory(quotes) {
+  if (!quotes.length) return "最近の画像リレー履歴はありません。";
+  const lines = quotes.map((quote, index) => {
+    const timestamp = quote.relayedAt ? `<t:${Math.floor(quote.relayedAt / 1000)}:R>` : "日時不明";
+    const source = quote.sourceChannelId ? `<#${quote.sourceChannelId}>` : "元チャンネル";
+    const original = quote.originalUrl ? `[元メッセージ](${quote.originalUrl})` : "元メッセージなし";
+    const forwarded = quote.forwardedUrl ? `[転送先](${quote.forwardedUrl})` : "転送先なし";
+    return `${index + 1}. ${timestamp} ${source} ${quote.imageCount ?? 0}枚\n${original} / ${forwarded}`;
+  });
+  return `🖼️ 最近の画像リレー\n${lines.join("\n")}`.slice(0, 1900);
 }
 
 async function fetchTargetChannel(channelId = defaultTargetChannelId) {
@@ -284,9 +410,29 @@ async function relayMessage(message) {
 
   const targetChannelId = getTargetChannelId(message.guildId);
   const targetChannel = await fetchTargetChannel(targetChannelId);
-  await targetChannel.send({
+  const forwardedMessage = await targetChannel.send({
     files: assets.map(({ url, name }) => ({ attachment: url, name })),
     allowedMentions: { parse: [] },
+  });
+
+  communityStore.incrementStats({
+    guildId: message.guildId,
+    event: "relays",
+  });
+  communityStore.incrementStats({
+    guildId: message.guildId,
+    event: "relayedImages",
+    amount: assets.length,
+  });
+  communityStore.addQuote(message.guildId, {
+    id: message.id,
+    sourceChannelId: message.channelId,
+    targetChannelId,
+    originalUrl: message.url ?? null,
+    forwardedUrl: forwardedMessage?.url ?? null,
+    forwardedMessageId: forwardedMessage?.id ?? null,
+    imageCount: assets.length,
+    relayedAt: Date.now(),
   });
 
   console.log(
@@ -335,7 +481,21 @@ async function processQuoteMessage(message, eventName) {
   }
 }
 
-async function handleAiPrompt(message, prompt, { prefix = "" } = {}) {
+async function handleAiPrompt(
+  message,
+  prompt,
+  { prefix = "", imageAssets = [], mentionUserIds = [], bypassCooldown = false } = {},
+) {
+  const tweetContext = await enrichPromptWithTweets(prompt).catch((error) => {
+    console.warn(`[fxtwitter] Could not enrich message ${message.id}: ${error.message}`);
+    return { prompt, tweetCount: 0, failedCount: 1 };
+  });
+  prompt = tweetContext.prompt;
+  const webContext = await enrichPromptWithWebPages(prompt).catch((error) => {
+    console.warn(`[web-fetch] Could not enrich message ${message.id}: ${error.message}`);
+    return { prompt, pageCount: 0, failedCount: 1 };
+  });
+  prompt = webContext.prompt;
   const moderation = moderatePrompt(prompt);
   if (!moderation.allowed) {
     await message.reply({
@@ -345,7 +505,7 @@ async function handleAiPrompt(message, prompt, { prefix = "" } = {}) {
     return true;
   }
 
-  if (!geminiApiKey && !groqApiKey) {
+  if (!geminiApiKey && !groqApiKey && !codexOAuthAvailable && !openaiApiKey) {
     await message.reply({
       content: "AI APIキー未設定。",
       allowedMentions: { repliedUser: false, parse: [] },
@@ -354,21 +514,51 @@ async function handleAiPrompt(message, prompt, { prefix = "" } = {}) {
   }
 
   const now = Date.now();
+  if (imageAssets.length > 0) {
+    if (getActiveProvider() !== "openai" || !codexOAuthAvailable) {
+      await message.reply({
+        content: "画像を読むには `/model provider name:openai` を選択してください。",
+        allowedMentions: { repliedUser: false, parse: [] },
+      });
+      return true;
+    }
+    const imageAccess = imageAccessLimiter.checkAndRecord(message.author.id, now);
+    if (!imageAccess.allowed) {
+      await message.reply({
+        content: `画像の読み込みは3分に1回です。あと${Math.ceil(imageAccess.retryAfterMs / 1000)}秒待ってください。`,
+        allowedMentions: { repliedUser: false, parse: [] },
+      });
+      return true;
+    }
+  }
   const cooldownUntil = geminiCooldowns.get(message.author.id) ?? 0;
-  if (cooldownUntil > now) {
+  if (!bypassCooldown && cooldownUntil > now) {
     await message.reply({
       content: "連投制限中。5秒待って。",
       allowedMentions: { repliedUser: false, parse: [] },
     });
     return true;
   }
-  geminiCooldowns.set(message.author.id, now + 5_000);
+  if (!bypassCooldown) geminiCooldowns.set(message.author.id, now + 5_000);
   const conversationKey = getAiConversationKey({
     guildId: message.guildId,
     channelId: message.channelId,
     userId: message.author.id,
   });
-  const history = aiConversationHistory.get(conversationKey);
+  const storedHistory = aiConversationHistory.get(conversationKey);
+  let history = storedHistory;
+  let channelHistoryCount = 0;
+  try {
+    const channelHistory = await fetchChannelMessageHistory(message, {
+      limit: DEFAULT_CHANNEL_HISTORY_LIMIT,
+    });
+    if (channelHistory.length > 0) {
+      history = channelHistory;
+      channelHistoryCount = channelHistory.length;
+    }
+  } catch (error) {
+    console.warn(`[ai] Could not load channel history for ${message.id}: ${error.message}`);
+  }
   const settings = aiSettingsStore.get(getAiSettingsKey(message));
 
   try {
@@ -377,27 +567,43 @@ async function handleAiPrompt(message, prompt, { prefix = "" } = {}) {
       geminiApiKey,
       geminiModel,
       groqApiKey,
-      groqModel,
+      groqModel: getActiveGroqModel(),
+      qwenModel: QWEN_GROQ_MODEL,
+      groqFallbackModel: groqModel,
+      openaiApiKey,
+      openaiOAuthAvailable: codexOAuthAvailable,
+      openaiModel,
+      preferredProvider: getActiveProvider(),
       history,
       settings,
+      imageAssets,
       onGeminiUsage: (usage) => geminiUsageTracker.recordGeminiUsage(usage),
       tracker: geminiUsageTracker,
     });
     aiConversationHistory.add(conversationKey, prompt, result.text);
+    if (message.guildId) {
+      communityStore.incrementStats({
+        guildId: message.guildId,
+        userId: message.author.id,
+        event: "aiReplies",
+      });
+    }
     console.log(
       `[ai] provider=${result.provider} reason=${result.reason} ` +
-        `contextTurns=${history.length / 2} message=${message.id}`,
+        `contextMessages=${channelHistoryCount || history.length} ` +
+        `tweets=${tweetContext.tweetCount} ` +
+        `webPages=${webContext.pageCount} message=${message.id}`,
     );
     await message.reply({
       content: prefix ? `${prefix}\n${result.text}` : result.text,
-      allowedMentions: { repliedUser: false, parse: [] },
+      allowedMentions: { repliedUser: false, parse: [], users: mentionUserIds },
     });
   } catch (error) {
     console.error(`[ai] Failed for message ${message.id}:`, error);
     let errorMessage = "AI応答エラー。";
-    if (isGeminiLimitError(error) || isGroqLimitError(error)) {
+    if (isGeminiLimitError(error) || isGroqLimitError(error) || isOpenAiLimitError(error)) {
       errorMessage = "AIの利用上限です。後で試して。";
-    } else if (isGeminiUnavailableError(error)) {
+    } else if (isGeminiUnavailableError(error) || isOpenAiUnavailableError(error)) {
       errorMessage = "AIが混雑中。後で試して。";
     } else if (isGeminiSafetyError(error)) {
       errorMessage = "その内容には対応できません。";
@@ -414,7 +620,18 @@ async function handleGeminiMention(message) {
   if (message.author.bot || !client.user) return false;
   const prompt = await extractAiPrompt(message, client.user.id);
   if (prompt === null) return false;
-  return handleAiPrompt(message, prompt);
+  const imageAssets = getImageAssets(message);
+  const effectivePrompt = prompt || (imageAssets.length ? "この画像を見て説明してください。" : prompt);
+  return handleAiPrompt(message, effectivePrompt, { imageAssets });
+}
+
+async function handleBattleMessage(message) {
+  if (!aiBattles.shouldReply(message)) return false;
+  return handleAiPrompt(message, buildBattlePrompt(message.content), {
+    prefix: `<@${BATTLE_TARGET_BOT_ID}>`,
+    mentionUserIds: [BATTLE_TARGET_BOT_ID],
+    bypassCooldown: true,
+  });
 }
 
 async function handleAnkCommand(message, command) {
@@ -487,6 +704,11 @@ async function handleGachaCommand(message) {
   if (message.author.bot || !message.guild) return false;
   if (!parseGachaCommand(message.content)) return false;
 
+  communityStore.incrementStats({
+    guildId: message.guildId,
+    userId: message.author.id,
+    event: "gachaPulls",
+  });
   await message.reply({
     content: formatGachaResult(rollGacha()),
     allowedMentions: { repliedUser: false, parse: [] },
@@ -494,10 +716,525 @@ async function handleGachaCommand(message) {
   return true;
 }
 
+async function handleSummaryCommand(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "サーバー内で実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  const channel = interaction.channel;
+  if (!channel?.isTextBased?.() || typeof channel.messages?.fetch !== "function") {
+    await interaction.reply({
+      content: "このチャンネルのメッセージを取得できません。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  if (!geminiApiKey && !groqApiKey && !codexOAuthAvailable && !openaiApiKey) {
+    await interaction.reply({
+      content: "AI APIキーが設定されていません。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  const cooldownUntil = geminiCooldowns.get(interaction.user.id) ?? 0;
+  if (cooldownUntil > Date.now()) {
+    await interaction.reply({
+      content: "連続実行を防ぐため、少し待ってから試してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  const requestedCount = interaction.options.getInteger("count") ?? DEFAULT_SUMMARY_COUNT;
+  const count = parseSummaryCount(requestedCount);
+
+  try {
+    await interaction.deferReply();
+    const messages = await channel.messages.fetch({ limit: count });
+    const prompt = buildSummaryPrompt(messages);
+    if (!prompt) {
+      await interaction.editReply({
+        content: "要約できるテキストメッセージがありません。",
+        allowedMentions: { parse: [] },
+      });
+      return true;
+    }
+
+    const moderation = moderatePrompt(prompt);
+    if (!moderation.allowed) {
+      await interaction.editReply({
+        content: moderation.message,
+        allowedMentions: { parse: [] },
+      });
+      return true;
+    }
+
+    geminiCooldowns.set(interaction.user.id, Date.now() + 5_000);
+    const result = await generateAiReply(prompt, {
+      geminiApiKey,
+      geminiModel,
+      groqApiKey,
+      groqModel: getActiveGroqModel(),
+      qwenModel: QWEN_GROQ_MODEL,
+      groqFallbackModel: groqModel,
+      openaiApiKey,
+      openaiOAuthAvailable: codexOAuthAvailable,
+      openaiModel,
+      preferredProvider: getActiveProvider(),
+      history: [],
+      taskInstruction: SUMMARY_TASK_INSTRUCTION,
+      settings: {
+        ...aiSettingsStore.get(getAiSettingsKey(interaction)),
+        length: "normal",
+      },
+      onGeminiUsage: (usage) => geminiUsageTracker.recordGeminiUsage(usage),
+      tracker: geminiUsageTracker,
+    });
+
+    communityStore.incrementStats({
+      guildId: interaction.guildId,
+      userId: interaction.user.id,
+      event: "aiReplies",
+    });
+
+    console.log(
+      `[summary] provider=${result.provider} reason=${result.reason} ` +
+        `messages=${count} channel=${interaction.channelId}`,
+    );
+    await interaction.editReply({
+      content: `📝 ${result.text}`,
+      allowedMentions: { parse: [] },
+    });
+  } catch (error) {
+    console.error(`[summary] Failed in channel ${interaction.channelId}:`, error);
+    let errorMessage = "要約中にエラーが発生しました。";
+    if (isGeminiLimitError(error) || isGroqLimitError(error) || isOpenAiLimitError(error)) {
+      errorMessage = "AIの利用上限です。少し待ってから試してください。";
+    } else if (isGeminiUnavailableError(error) || isOpenAiUnavailableError(error)) {
+      errorMessage = "AIが混雑しています。少し待ってから試してください。";
+    }
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({
+        content: errorMessage,
+        allowedMentions: { parse: [] },
+      });
+    } else {
+      await interaction.reply({
+        content: errorMessage,
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+  }
+  return true;
+}
+
+async function handleAhooNewsCommand(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "サーバー内で実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  if (!geminiApiKey && !groqApiKey && !codexOAuthAvailable && !openaiApiKey) {
+    await interaction.reply({
+      content: "AI APIキーが設定されていません。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  const cooldownUntil = geminiCooldowns.get(interaction.user.id) ?? 0;
+  if (cooldownUntil > Date.now()) {
+    await interaction.reply({
+      content: "連続実行を防ぐため、少し待ってから試してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  const topic = interaction.options.getString("topic") ?? "";
+  const prompt = buildAhooNewsPrompt(topic);
+  const moderation = moderatePrompt(prompt);
+  if (!moderation.allowed) {
+    await interaction.reply({
+      content: moderation.message,
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  try {
+    await interaction.deferReply();
+    geminiCooldowns.set(interaction.user.id, Date.now() + 5_000);
+    const result = await generateAiReply(prompt, {
+      geminiApiKey,
+      geminiModel,
+      groqApiKey,
+      groqModel: getActiveGroqModel(),
+      qwenModel: QWEN_GROQ_MODEL,
+      groqFallbackModel: groqModel,
+      openaiApiKey,
+      openaiOAuthAvailable: codexOAuthAvailable,
+      openaiModel,
+      preferredProvider: getActiveProvider(),
+      history: [],
+      taskInstruction: AHOO_NEWS_TASK_INSTRUCTION,
+      settings: {
+        ...aiSettingsStore.get(getAiSettingsKey(interaction)),
+        length: "normal",
+      },
+      onGeminiUsage: (usage) => geminiUsageTracker.recordGeminiUsage(usage),
+      tracker: geminiUsageTracker,
+    });
+
+    communityStore.incrementStats({
+      guildId: interaction.guildId,
+      userId: interaction.user.id,
+      event: "aiReplies",
+    });
+    console.log(
+      `[ahoo] provider=${result.provider} reason=${result.reason} ` +
+        `channel=${interaction.channelId} user=${interaction.user.id}`,
+    );
+    await interaction.editReply({
+      content: formatAhooNewsReply(result.text),
+      allowedMentions: { parse: [] },
+    });
+  } catch (error) {
+    console.error(`[ahoo] Failed in channel ${interaction.channelId}:`, error);
+    let errorMessage = "架空ニュースの生成中にエラーが発生しました。";
+    if (isGeminiLimitError(error) || isGroqLimitError(error) || isOpenAiLimitError(error)) {
+      errorMessage = "AIの利用上限です。少し待ってから試してください。";
+    } else if (isGeminiUnavailableError(error) || isOpenAiUnavailableError(error)) {
+      errorMessage = "AIが混雑しています。少し待ってから試してください。";
+    }
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({
+        content: errorMessage,
+        allowedMentions: { parse: [] },
+      });
+    } else {
+      await interaction.reply({
+        content: errorMessage,
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+  }
+  return true;
+}
+
+async function handlePollCommand(interaction) {
+  if (!interaction.guild || !interaction.channel?.isTextBased?.()) {
+    await interaction.reply({
+      content: "サーバーのテキストチャンネルで実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  const commandOptions = interaction.options;
+  const options = ["option1", "option2", "option3", "option4", "option5"]
+    .map((name) => commandOptions.getString(name))
+    .filter((option) => option !== null);
+  const durationMinutes = commandOptions.getInteger("duration") ?? DEFAULT_POLL_DURATION_MINUTES;
+  const poll = createPoll({
+    id: `p-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    messageId: "pending",
+    createdBy: interaction.user.id,
+    question: commandOptions.getString("question", true),
+    options,
+    durationMinutes,
+  });
+
+  try {
+    const sentMessage = await interaction.reply({
+      content: formatPollContent(poll),
+      components: buildPollComponents(poll),
+      allowedMentions: { parse: [] },
+      fetchReply: true,
+    });
+    poll.messageId = sentMessage.id;
+    communityStore.setPoll(poll);
+    communityStore.incrementStats({
+      guildId: interaction.guildId,
+      userId: interaction.user.id,
+      event: "pollsCreated",
+    });
+  } catch (error) {
+    console.error("[poll] Could not create poll:", error);
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: "投票の作成に失敗しました。Botの送信権限を確認してください。",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+  }
+  return true;
+}
+
+async function handlePollButton(interaction) {
+  const match = interaction.customId.match(/^poll:([^:]+):(\d+)$/);
+  if (!match) return false;
+
+  const poll = communityStore.getPoll(match[1]);
+  if (!poll) {
+    await interaction.reply({
+      content: "この投票は見つからないか、すでに削除されています。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  const optionIndex = Number.parseInt(match[2], 10);
+  const result = castPollVote(poll, interaction.user.id, optionIndex);
+  if (!result.ok && result.reason === "expired") {
+    closePoll(poll);
+    communityStore.setPoll(poll);
+    await interaction.reply({
+      content: "この投票は終了しています。",
+      flags: MessageFlags.Ephemeral,
+    });
+    await updatePollMessage(poll).catch((error) =>
+      console.error(`[poll] Could not close expired poll ${poll.id}:`, error.message),
+    );
+    return true;
+  }
+  if (!result.ok || poll.status !== "active") {
+    await interaction.reply({
+      content: "この投票は終了しています。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  if (result.changed) {
+    communityStore.setPoll(poll);
+    communityStore.incrementStats({
+      guildId: poll.guildId,
+      userId: interaction.user.id,
+      event: "pollVotes",
+    });
+  }
+  await interaction.reply({
+    content: result.changed ? "投票を受け付けました。" : "すでにこの選択肢へ投票しています。",
+    flags: MessageFlags.Ephemeral,
+  });
+  if (result.changed) {
+    await updatePollMessage(poll).catch((error) =>
+      console.error(`[poll] Could not update poll ${poll.id}:`, error.message),
+    );
+  }
+  return true;
+}
+
+async function handleRemindCommand(interaction) {
+  if (!interaction.guild || !interaction.channel?.isTextBased?.()) {
+    await interaction.reply({
+      content: "サーバーのテキストチャンネルで実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  const subcommand = interaction.options.getSubcommand();
+  if (subcommand === "set") {
+    const activeCount = communityStore.countUserReminders(
+      interaction.guildId,
+      interaction.user.id,
+    );
+    if (activeCount >= MAX_ACTIVE_REMINDERS_PER_USER) {
+      await interaction.reply({
+        content: `登録できるリマインダーは${MAX_ACTIVE_REMINDERS_PER_USER}件までです。`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return true;
+    }
+
+    const minutes = parseReminderMinutes(interaction.options.getInteger("minutes"));
+    const text = interaction.options.getString("text", true);
+    if (!minutes) {
+      await interaction.reply({
+        content: "通知時間は1分後から7日後まで指定できます。",
+        flags: MessageFlags.Ephemeral,
+      });
+      return true;
+    }
+
+    const reminder = createReminder({
+      id: `r-${randomUUID().replaceAll("-", "").slice(0, 8)}`,
+      guildId: interaction.guildId,
+      channelId: interaction.channelId,
+      userId: interaction.user.id,
+      text,
+      minutes,
+    });
+    communityStore.setReminder(reminder);
+    communityStore.incrementStats({
+      guildId: interaction.guildId,
+      userId: interaction.user.id,
+      event: "remindersCreated",
+    });
+    await interaction.reply({
+      content: `リマインダーを登録しました（ID: \`${reminder.id}\`、<t:${Math.floor(reminder.dueAt / 1000)}:R>）。`,
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
+    return true;
+  }
+
+  if (subcommand === "list") {
+    await interaction.reply({
+      content: formatReminderList(
+        communityStore.listReminders({
+          guildId: interaction.guildId,
+          userId: interaction.user.id,
+        }),
+      ),
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
+    return true;
+  }
+
+  const id = interaction.options.getString("id", true);
+  const reminder = communityStore.getReminder(id);
+  if (
+    !reminder ||
+    reminder.guildId !== interaction.guildId ||
+    reminder.userId !== interaction.user.id
+  ) {
+    await interaction.reply({
+      content: "そのリマインダーは見つかりません。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+  communityStore.deleteReminder(id);
+  await interaction.reply({
+    content: `リマインダー \`${id}\` を取り消しました。`,
+    flags: MessageFlags.Ephemeral,
+  });
+  return true;
+}
+
+async function handleStatsCommand(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "サーバー内で実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+  const isUser = interaction.options.getSubcommand() === "me";
+  const stats = communityStore.getStats(interaction.guildId, isUser ? interaction.user.id : null);
+  const activePolls = communityStore.listPolls().filter(
+    (poll) => poll.guildId === interaction.guildId && poll.status === "active",
+  ).length;
+  await interaction.reply({
+    content: formatCommunityStats(stats, { isUser, activePolls }),
+    ...(isUser ? { flags: MessageFlags.Ephemeral } : {}),
+    allowedMentions: { parse: [] },
+  });
+  return true;
+}
+
+async function handleQuotesCommand(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "サーバー内で実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+  const count = interaction.options.getInteger("count") ?? 10;
+  await interaction.reply({
+    content: formatQuoteHistory(communityStore.getQuotes(interaction.guildId, count)),
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: { parse: [] },
+  });
+  return true;
+}
+
+async function processExpiredPolls(now = Date.now()) {
+  for (const poll of communityStore.listPolls()) {
+    if (poll.status !== "active" || !isPollExpired(poll, now)) continue;
+    closePoll(poll, now);
+    communityStore.setPoll(poll);
+    await updatePollMessage(poll).catch((error) =>
+      console.error(`[poll] Could not finalize poll ${poll.id}:`, error.message),
+    );
+  }
+}
+
+async function deliverReminder(reminder) {
+  const content = `<@${reminder.userId}> ⏰ リマインダー: ${reminder.text}`;
+  const payload = {
+    content,
+    allowedMentions: { parse: [], users: [reminder.userId] },
+  };
+
+  try {
+    const channel = await client.channels.fetch(reminder.channelId);
+    if (!channel?.isTextBased?.() || typeof channel.send !== "function") {
+      throw new Error(`Reminder channel is not writable: ${reminder.channelId}`);
+    }
+    await channel.send(payload);
+    return true;
+  } catch (channelError) {
+    try {
+      const user = await client.users.fetch(reminder.userId);
+      await user.send(payload);
+      console.warn(`[remind] Delivered ${reminder.id} by DM after channel failure`);
+      return true;
+    } catch (dmError) {
+      console.error(
+        `[remind] Could not deliver ${reminder.id}: channel=${channelError.message}; dm=${dmError.message}`,
+      );
+      return false;
+    }
+  }
+}
+
+async function processDueReminders(now = Date.now()) {
+  for (const reminder of communityStore.listDueReminders(now)) {
+    const current = communityStore.getReminder(reminder.id);
+    if (!current) continue;
+    current.lastAttemptAt = now;
+    communityStore.setReminder(current);
+    if (await deliverReminder(current)) communityStore.deleteReminder(current.id);
+  }
+}
+
+async function processCommunityJobs() {
+  await processExpiredPolls();
+  await processDueReminders();
+}
+
+function startCommunityScheduler() {
+  if (communityTimer) return;
+  communityTimer = setInterval(() => {
+    processCommunityJobs().catch((error) => console.error("[community] Scheduled job failed:", error));
+  }, COMMUNITY_TIMER_INTERVAL_MS);
+  communityTimer.unref?.();
+  processCommunityJobs().catch((error) => console.error("[community] Initial job failed:", error));
+}
+
 async function stopBotAndSleep() {
   console.log(`[sleep] ${systemSleepTime} reached. Stopping bot and suspending Windows.`);
   try {
-    if (autoReactionTimer) clearInterval(autoReactionTimer);
+    if (communityTimer) clearInterval(communityTimer);
+    communityTimer = null;
+    communityStore.close();
     launchWindowsSleepHelper();
     client.destroy();
     setTimeout(() => process.exit(0), 500).unref();
@@ -564,16 +1301,8 @@ async function changeTargetChannel({ guild, canManageGuild, channelQuery, reply 
 
 async function registerSlashCommands(readyClient) {
   for (const guild of readyClient.guilds.cache.values()) {
-    for (const commandBuilder of slashCommands) {
-      const commandData = commandBuilder.toJSON();
-      const existing = await guild.commands.fetch();
-      const existingCommand = existing.find((command) => command.name === commandData.name);
-      if (existingCommand) {
-        await existingCommand.edit(commandData);
-      } else {
-        await guild.commands.create(commandData);
-      }
-    }
+    await guild.commands.set(slashCommands.map((commandBuilder) => commandBuilder.toJSON()));
+    console.log(`[ready] Slash commands synchronized for guild ${guild.id}`);
   }
 }
 
@@ -584,6 +1313,14 @@ client.once(Events.ClientReady, async (readyClient) => {
   console.log(`[ready] Bot name fallback: ${quoteBotName}`);
   console.log(`[ready] Gemini replies: ${geminiApiKey ? `enabled (${geminiModel})` : "disabled"}`);
   console.log(`[ready] Groq fallback: ${groqApiKey ? `enabled (${groqModel})` : "disabled"}`);
+  console.log(
+    `[ready] OpenAI replies: ${codexOAuthAvailable
+      ? `enabled (ChatGPT/Codex OAuth${openaiModel ? `, ${openaiModel}` : ""})`
+      : openaiApiKey
+        ? `enabled (API key, ${openaiModel ?? DEFAULT_OPENAI_MODEL})`
+        : "disabled"}`,
+  );
+  console.log(`[ready] Primary AI provider: ${activeAiProvider}`);
   console.log(
     `[ready] Gemini soft limit: ${geminiUsageTracker.softRequestsPerMinute} requests/minute; ` +
       `fallback circuit: ${geminiFallbackMinutes} minutes`,
@@ -598,18 +1335,6 @@ client.once(Events.ClientReady, async (readyClient) => {
   } else {
     console.log("[ready] Windows sleep schedule: disabled");
   }
-  if (autoReactionEnabled) {
-    autoReactionTimer = setInterval(autoReactToRandomMessage, autoReactionIntervalMs);
-    autoReactionTimer.unref?.();
-    console.log(
-      `[ready] Auto reactions: every ${autoReactionIntervalMs / 1000}s; ` +
-        `up to ${autoReactionBatchSize} reactions; ` +
-        `${autoReactionMinActivity}+ messages/${autoReactionActivityWindowMs / 1000}s ` +
-        `(${autoReactionEmojis.join(", ")})`,
-    );
-  } else {
-    console.log("[ready] Auto reactions: disabled");
-  }
   console.log(`[ready] Forwarding images to channel ${defaultTargetChannelId}`);
   if (sourceChannelIds.length) {
     console.log(`[ready] Source channel filter: ${sourceChannelIds.join(", ")}`);
@@ -618,9 +1343,11 @@ client.once(Events.ClientReady, async (readyClient) => {
   try {
     await registerSlashCommands(readyClient);
     console.log(
-      "[ready] Slash commands registered: /chanel, /channel, /rate limit, /reset, /status, /context, /settings",
+      "[ready] Slash commands registered: /chanel, /channel, /help, /ahoo news, /rate limit, /reset, /status, /context, /ai battle, /model, /summarize, /poll, /remind, /stats, /quotes, /settings",
     );
     console.log("[ready] Prefix commands: !ank N / !ank status / !ank stop / !gacha");
+    startCommunityScheduler();
+    console.log(`[ready] Community jobs: every ${COMMUNITY_TIMER_INTERVAL_MS / 1000}s`);
     await fetchTargetChannel(defaultTargetChannelId);
     console.log(`[ready] Default target channel is available: ${defaultTargetChannelId}`);
     if (Object.keys(targetOverrides).length > 0) {
@@ -634,7 +1361,86 @@ client.once(Events.ClientReady, async (readyClient) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isButton()) {
+    await handlePollButton(interaction);
+    return;
+  }
   if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === "ai") {
+    if (interaction.options.getSubcommandGroup() !== "battle") return;
+    const action = interaction.options.getSubcommand();
+    if (action === "st") {
+      if (interaction.user.id !== BATTLE_START_USER_ID) {
+        await interaction.reply({
+          content: "討論を開始できるのは指定ユーザーだけです。",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      if (!interaction.guild || !interaction.channel?.isTextBased?.()) {
+        await interaction.reply({
+          content: "サーバーのテキストチャンネルで実行してください。",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      aiBattles.start(interaction.channelId, interaction.user.id);
+      await interaction.reply({
+        content: `<@${BATTLE_TARGET_BOT_ID}> 討論を始めよう。まず議題か主張を提示してください。`,
+        allowedMentions: { parse: [], users: [BATTLE_TARGET_BOT_ID] },
+      });
+      return;
+    }
+
+    const stopped = aiBattles.stop(interaction.channelId);
+    await interaction.reply({
+      content: stopped ? "このチャンネルのAI討論を停止しました。" : "このチャンネルではAI討論は動いていません。",
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  if (interaction.commandName === "model") {
+    if (!canSelectModel(interaction.user.id)) {
+      await interaction.reply({
+        content: "このコマンドを使用する権限がありません。",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    if (interaction.options.getSubcommand() !== "provider") return;
+
+    const provider = interaction.options.getString("name", true);
+    if (!isProviderAvailable(provider)) {
+      await interaction.reply({
+        content: `${AI_MODEL_LABELS[provider] ?? provider} はBot側で安全に設定されていません。管理者がサーバー環境変数を設定してください。APIキーをDiscordへ投稿しないでください。`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    activeAiProvider = saveSelectedProvider(modelSelectionPath, provider);
+    const modelName = {
+      gemini: geminiModel,
+      groq: groqModel,
+      qwen: QWEN_GROQ_MODEL,
+      openai: codexOAuthAvailable
+        ? `ChatGPT/Codex OAuth${openaiModel ? ` / ${openaiModel}` : ""}`
+        : openaiModel ?? DEFAULT_OPENAI_MODEL,
+    }[activeAiProvider];
+    console.log(
+      `[config] AI model changed by user ${interaction.user.id}: ` +
+        `provider=${activeAiProvider} model=${modelName}`,
+    );
+    await interaction.reply({
+      content: `AIプロバイダーを ${AI_MODEL_LABELS[activeAiProvider]}（${modelName}）へ変更しました。認証情報はDiscordには表示されません。`,
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
 
   if (interaction.commandName === "rate") {
     if (interaction.options.getSubcommand() !== "limit") return;
@@ -697,7 +1503,61 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  if (interaction.commandName === "help") {
+    await interaction.reply({
+      content: buildHelpMessage(),
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  if (interaction.commandName === "ahoo") {
+    if (interaction.options.getSubcommand() === "news") {
+      await handleAhooNewsCommand(interaction);
+    }
+    return;
+  }
+
+  if (interaction.commandName === "summarize") {
+    await handleSummaryCommand(interaction);
+    return;
+  }
+
+  if (interaction.commandName === "poll") {
+    await handlePollCommand(interaction);
+    return;
+  }
+
+  if (interaction.commandName === "remind") {
+    await handleRemindCommand(interaction);
+    return;
+  }
+
+  if (interaction.commandName === "stats") {
+    await handleStatsCommand(interaction);
+    return;
+  }
+
+  if (interaction.commandName === "quotes") {
+    await handleQuotesCommand(interaction);
+    return;
+  }
+
   if (interaction.commandName === "settings") {
+    if (
+      !canChangeAiSettings(interaction.user.id, aiSettingsAllowedUserIds, {
+        canManageGuild:
+          interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false,
+      })
+    ) {
+      await interaction.reply({
+        content: "AI設定を変更する権限がありません。",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
     const setting = interaction.options.getSubcommand();
     const value = interaction.options.getString("value", true);
     const settings = aiSettingsStore.set(
@@ -751,7 +1611,57 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.on(Events.MessageCreate, async (message) => {
+  if (await handleBattleMessage(message)) return;
   if (!message.author.bot && message.guild) {
+    communityStore.incrementStats({
+      guildId: message.guildId,
+      userId: message.author.id,
+      event: "messages",
+    });
+    if (isKimazuMentionCommand(message.content, client.user?.id)) {
+      if (!message.reference?.messageId) {
+        await message.reply({
+          content: "誰かのメッセージに返信しながら `@Bot名 kimazui` と送ってください。",
+          allowedMentions: { repliedUser: false, parse: [] },
+        });
+        return;
+      }
+
+      try {
+        const repliedMessage = await message.channel.messages.fetch(message.reference.messageId);
+        const avatarUrl = repliedMessage.author.displayAvatarURL({
+          extension: "png",
+          forceStatic: true,
+          size: 512,
+        });
+        const avatar = await downloadImage(avatarUrl);
+        const botMember = message.guild.members.me;
+        const image = await createKimazuImage(avatar, {
+          messageText:
+            cleanKimazuMessageText(repliedMessage.cleanContent, {
+              botUserId: client.user.id,
+              botNames: [client.user.username, botMember?.displayName],
+            }) ||
+            (repliedMessage.attachments.size > 0 ? "（画像・ファイル付きメッセージ）" : ""),
+        });
+        await message.reply({
+          files: [{ attachment: image, name: "kimazu.jpg" }],
+          allowedMentions: { repliedUser: false, parse: [] },
+        });
+      } catch (error) {
+        console.error(`[kimazu] Failed for message ${message.id}:`, error);
+        await message.reply({
+          content: "画像を作れませんでした。少し待ってからもう一度試してください。",
+          allowedMentions: { repliedUser: false, parse: [] },
+        });
+      }
+      return;
+    }
+    const personaCommand = parsePersonaSwitchCommand(message.content);
+    if (personaCommand) {
+      await handlePersonaSwitchCommand(message, personaCommand.persona);
+      return;
+    }
     if (await handleGachaCommand(message)) return;
 
     const ankCommand = parseAnkCommand(message.content);
@@ -783,7 +1693,6 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
-    rememberAutoReactionMessage(message);
     if (await handleAnkCandidate(message)) return;
   }
 
@@ -806,6 +1715,10 @@ client.on(Events.MessageUpdate, async (_oldMessage, newMessage) => {
 
 client.on(Events.Error, (error) => {
   console.error("[discord] Client error:", error);
+});
+
+process.on("exit", () => {
+  communityStore.close();
 });
 
 process.on("unhandledRejection", (error) => {

@@ -1,6 +1,19 @@
 const IMAGE_CONTENT_TYPE = /^image\//i;
 const IMAGE_EXTENSION = /\.(?:png|jpe?g|gif|webp|avif|bmp|tiff?)$/i;
 const URL_PATTERN = /https?:\/\/[^\s<>]+/gi;
+const ALLOWED_DISCORD_ASSET_HOSTS = new Set([
+  "cdn.discordapp.com",
+  "media.discordapp.net",
+]);
+
+function isAllowedDiscordAssetUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && ALLOWED_DISCORD_ASSET_HOSTS.has(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
 
 function getUrlExtension(url) {
   try {
@@ -19,7 +32,7 @@ function cleanFileName(name) {
 }
 
 function isImageAttachment(attachment) {
-  if (!attachment?.url) return false;
+  if (!attachment?.url || !isAllowedDiscordAssetUrl(attachment.url)) return false;
   if (attachment.contentType && IMAGE_CONTENT_TYPE.test(attachment.contentType)) {
     return true;
   }
@@ -27,7 +40,12 @@ function isImageAttachment(attachment) {
 }
 
 function isUnknownAttachment(attachment) {
-  if (!attachment?.url || attachment.contentType || isImageAttachment(attachment)) {
+  if (
+    !attachment?.url ||
+    !isAllowedDiscordAssetUrl(attachment.url) ||
+    attachment.contentType ||
+    isImageAttachment(attachment)
+  ) {
     return false;
   }
   const name = attachment.name ?? attachment.url.split("?")[0];
@@ -38,8 +56,8 @@ function isLikelyImageUrl(url) {
   try {
     const parsed = new URL(url);
     return (
-      IMAGE_EXTENSION.test(parsed.pathname) ||
-      /(?:cdn\.discordapp\.com|media\.discordapp\.net)$/i.test(parsed.hostname)
+      isAllowedDiscordAssetUrl(url) &&
+      (IMAGE_EXTENSION.test(parsed.pathname) || ALLOWED_DISCORD_ASSET_HOSTS.has(parsed.hostname))
     );
   } catch {
     return false;
@@ -64,7 +82,7 @@ function getImageAssets(message, { includeUnknownAttachments = false } = {}) {
 
   for (const embed of message.embeds ?? []) {
     const url = embed.image?.url ?? embed.thumbnail?.url;
-    if (!url) continue;
+    if (!url || !isAllowedDiscordAssetUrl(url)) continue;
     assets.push({ url, name: `quote${getUrlExtension(url)}` });
   }
 
@@ -82,19 +100,8 @@ function getImageAssets(message, { includeUnknownAttachments = false } = {}) {
   });
 }
 
-function normalizeBotName(name) {
-  return typeof name === "string" ? name.trim().toLowerCase().replace(/\s+/g, " ") : "";
-}
-
-function isQuoteBotAuthor(author, quoteBotId, quoteBotName) {
-  if (!author?.bot) return false;
-  if (quoteBotId && author.id === quoteBotId) return true;
-
-  const expectedName = normalizeBotName(quoteBotName);
-  if (!expectedName) return false;
-  return [author.username, author.globalName].some(
-    (name) => normalizeBotName(name) === expectedName,
-  );
+function isQuoteBotAuthor(author, quoteBotId) {
+  return Boolean(author?.bot && quoteBotId && author.id === quoteBotId);
 }
 
 function getImageUrls(message) {
@@ -118,9 +125,11 @@ function shouldRelay(
 }
 
 export {
+  ALLOWED_DISCORD_ASSET_HOSTS,
   getImageAssets,
   getImageUrls,
   isImageAttachment,
+  isAllowedDiscordAssetUrl,
   isQuoteBotAuthor,
   shouldRelay,
 };

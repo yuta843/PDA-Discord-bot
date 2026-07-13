@@ -10,7 +10,7 @@
    - 転送先: View Channel / Send Messages / Attach Files
    - Botの設定で「Message Content Intent」を有効にする。
 3. Discordのユーザー設定からDeveloper Modeを有効にし、転送先チャンネルを右クリックして「チャンネルIDをコピー」する。
-4. `.env.example`を`.env`にコピーして、`DISCORD_TOKEN`と`TARGET_CHANNEL_ID`を設定する。
+4. `.env`を開いて、`DISCORD_TOKEN`と`TARGET_CHANNEL_ID`を設定する。
 5. 依存関係をインストールして起動する。
 
 ```powershell
@@ -48,6 +48,8 @@ Discord Developer Portalの対象Applicationで、次を確認してください
 
 Geminiが同じ言語で一文だけ、短く返信します。ユーザーごとに5秒の連続実行制限があります。
 
+AIがチャンネルで応答するときは、現在のメッセージより前にある同一チャンネルの直近30件（発言者を問わず）を会話コンテキストとして参照します。履歴を取得できない場合は、従来の保存済みコンテキストを使用します。
+
 - 5秒以内の連投: `連投制限中。5秒待って。`
 - Gemini APIの利用上限: `Geminiの利用上限です。後で試して。`
 - Gemini APIの混雑: `Geminiが混雑中。後で試して。`
@@ -62,9 +64,12 @@ Geminiが同じ言語で一文だけ、短く返信します。ユーザーご�
 ```env
 GROQ_API_KEY=取得したGroq APIキー
 GROQ_MODEL=openai/gpt-oss-20b
+AI_PROVIDER=groq
 GEMINI_SOFT_RPM=8
 GEMINI_FALLBACK_MINUTES=15
 ```
+
+`AI_PROVIDER=groq`にすると、Geminiの上限を待たずGroqを主プロバイダーとして使用します。`gemini`または未設定の場合はGeminiを主に使い、上限時のみGroqへ自動切り替えします。
 
 Geminiへのリクエストが直近1分で8回に達すると、上限へ近づいたものとしてGroqを優先します。Geminiが429または503を返した場合は、その質問を即座にGroqで再実行し、その後15分間はGroqを優先します。切り替え状況は`[ai] provider=... reason=...`ログで確認できます。
 
@@ -106,6 +111,41 @@ npm.cmd test
 ```
 
 Botを動かしている間、コンソールに`[relay] ... image(s) forwarded`が表示されれば転送成功です。
+
+## コミュニティ機能
+
+サーバー内では次のslash commandを利用できます。
+
+```text
+/help
+/ahoo news [topic]
+/poll question option1 option2 [option3] [option4] [option5] [duration]
+/remind set minutes text
+/remind list
+/remind cancel id
+/stats server
+/stats me
+/quotes [count]
+/summarize [count]
+/model provider name
+/ai battle st
+/ai battle stop
+ペルソナ切り替え: pda_founder
+```
+
+- `/poll` はボタン式投票を作成し、期限が来ると自動終了します。
+- `/remind` は指定した分数後に元のチャンネルへ通知します。送信できない場合はDMを試します。
+- `/stats` はサーバーまたは自分の活動統計を表示します。
+- `/quotes` は最近成功した画像リレーへのリンクを表示します。
+- `/ai battle st` はユーザーID `1068329268397998161` だけが開始でき、Bot `1526014470806048839` を必ずメンションして討論します。`/ai battle stop` は誰でも停止できます。
+- OpenAIは、このPCで`codex login`済みならChatGPT/Codex OAuthを優先します。APIキーをDiscordへ投稿する必要はありません。
+- OAuthで使うモデルは`CODEX_MODEL`で変更できます（未設定時は`gpt-5.6-luna`、推論強度は`low`）。従来の`OPENAI_MODEL`はAPIキー利用時だけ参照します。
+- Codex OAuth経由ではWeb検索だけを許可し、ファイル操作・コマンド実行・書き込みは禁止します。
+- Discordの画像添付だけを読み込めます。一般ユーザーは3分に1回、ユーザーID `1068329268397998161` は無制限です。画像以外の添付ファイルは読み込みません。
+- Botへのメンションに公開XポストのURLを含めると、`api.fxtwitter.com`から本文・投稿者・日時・反応数・引用ポストを取得してAIへ渡します（1回最大3件、X側の画像ファイルは読み込みません）。
+- Web検索結果で`x.com`または`twitter.com`の投稿URLを見つけた場合も、対応する`api.fxtwitter.com`のJSON URLへ置換して読み込みます。
+- Botへのメンションに一般のHTTPS URLを含めるとWeb Fetchで本文を取得します。公開IPのHTML・JSON・プレーンテキストだけを対象にし、JavaScript、画像、実行ファイル、ローカル／プライベートIP、1MB超のページは拒否します（最大3ページ）。
+- 投票、リマインダー、統計、リレー履歴は `community-data.json` に保存されます。
 
 ## 注意
 

@@ -4,6 +4,8 @@ import {
   isGeminiUnavailableError,
 } from "./gemini.js";
 import { generateGroqShortReply } from "./groq.js";
+import { generateOpenAiShortReply } from "./openai.js";
+import { generateCodexOAuthShortReply } from "./codex-oauth.js";
 
 function getLocalDateKey(timestamp) {
   const date = new Date(timestamp);
@@ -55,7 +57,8 @@ class GeminiUsageTracker {
       now < this.fallbackUntil ||
       this.requestTimes.length >= this.softRequestsPerMinute ||
       (this.softTokensPerMinute !== null && tokensUsedThisMinute >= this.softTokensPerMinute) ||
-      (this.dailyRequestLimit !== null && this.dailyRequestUsage >= this.dailyRequestLimit)
+      (this.dailyRequestLimit !== null && this.dailyRequestUsage >= this.dailyRequestLimit) ||
+      (this.dailyTokenLimit !== null && this.dailyTokenUsage >= this.dailyTokenLimit)
     );
   }
 
@@ -118,28 +121,100 @@ async function generateAiReply(
     geminiModel,
     groqApiKey,
     groqModel,
+    qwenModel,
+    groqFallbackModel,
+    openaiApiKey,
+    openaiOAuthAvailable = false,
+    openaiModel,
+    preferredProvider = "gemini",
     history = [],
     settings = {},
+    taskInstruction = "",
+    imageAssets = [],
     onGeminiUsage,
     tracker,
     geminiGenerator = generateShortReply,
     groqGenerator = generateGroqShortReply,
+    openaiGenerator = generateOpenAiShortReply,
+    codexOAuthGenerator = generateCodexOAuthShortReply,
     now = Date.now(),
   },
 ) {
   const canUseGemini = Boolean(geminiApiKey);
   const canUseGroq = Boolean(groqApiKey);
-  if (!canUseGemini && !canUseGroq) throw new Error("No AI API key is configured.");
+  const canUseOpenAi = openaiOAuthAvailable || Boolean(openaiApiKey);
+  if (!canUseGemini && !canUseGroq && !canUseOpenAi) {
+    throw new Error("No AI API key is configured.");
+  }
+
+  const generateGroqCascade = async (primaryModel) => {
+    try {
+      return {
+        text: await groqGenerator(prompt, {
+          apiKey: groqApiKey,
+          model: primaryModel,
+          history,
+          settings,
+          taskInstruction,
+        }),
+        model: primaryModel,
+        usedModelFallback: false,
+      };
+    } catch (error) {
+      if (!groqFallbackModel || groqFallbackModel === primaryModel) throw error;
+      return {
+        text: await groqGenerator(prompt, {
+          apiKey: groqApiKey,
+          model: groqFallbackModel,
+          history,
+          settings,
+          taskInstruction,
+        }),
+        model: groqFallbackModel,
+        usedModelFallback: true,
+      };
+    }
+  };
+
+  if (preferredProvider === "openai") {
+    if (!canUseOpenAi) throw new Error("ChatGPT/Codex OAuth is not configured.");
+    return {
+      text: openaiOAuthAvailable
+        ? await codexOAuthGenerator(prompt, {
+            model: openaiModel,
+            history,
+            settings,
+            taskInstruction,
+            imageAssets,
+          })
+        : await openaiGenerator(prompt, {
+            apiKey: openaiApiKey,
+            model: openaiModel,
+            history,
+            settings,
+            taskInstruction,
+          }),
+      provider: "openai",
+      reason: openaiOAuthAvailable ? "codex-oauth" : "configured-primary",
+    };
+  }
+
+  if (preferredProvider === "groq" && canUseGroq) {
+    const result = await generateGroqCascade(groqModel);
+    return {
+      text: result.text,
+      provider: "groq",
+      model: result.model,
+      reason: result.usedModelFallback ? "groq-model-fallback" : "configured-primary",
+    };
+  }
 
   if ((!canUseGemini || tracker.shouldPreferGroq(now)) && canUseGroq) {
+    const result = await generateGroqCascade(qwenModel ?? groqModel);
     return {
-      text: await groqGenerator(prompt, {
-        apiKey: groqApiKey,
-        model: groqModel,
-        history,
-        settings,
-      }),
+      text: result.text,
       provider: "groq",
+      model: result.model,
       reason: canUseGemini ? "gemini-soft-limit" : "gemini-unavailable",
     };
   }
@@ -152,6 +227,7 @@ async function generateAiReply(
         model: geminiModel,
         history,
         settings,
+        taskInstruction,
         onUsage: onGeminiUsage,
       }),
       provider: "gemini",
@@ -162,14 +238,11 @@ async function generateAiReply(
     if (!shouldFallback || !canUseGroq) throw error;
 
     tracker.openFallbackCircuit(now);
+    const result = await generateGroqCascade(qwenModel ?? groqModel);
     return {
-      text: await groqGenerator(prompt, {
-        apiKey: groqApiKey,
-        model: groqModel,
-        history,
-        settings,
-      }),
+      text: result.text,
       provider: "groq",
+      model: result.model,
       reason: isGeminiLimitError(error) ? "gemini-limit" : "gemini-unavailable",
     };
   }
