@@ -1,3 +1,5 @@
+const AI_STYLE_ALLOWED_USER_ID = "1068329268397998161";
+
 function parseAiSettingsAllowedUserIds(value = "") {
   return new Set(
     String(value)
@@ -13,4 +15,13 @@ function canChangeAiSettings(userId, allowedUserIds, { canManageGuild = false } 
   return typeof userId === "string" && allowedUserIds.has(userId);
 }
 
-export { canChangeAiSettings, parseAiSettingsAllowedUserIds };
+function canChangeAiStyle(userId) {
+  return typeof userId === "string" && userId === AI_STYLE_ALLOWED_USER_ID;
+}
+
+export {
+  AI_STYLE_ALLOWED_USER_ID,
+  canChangeAiSettings,
+  canChangeAiStyle,
+  parseAiSettingsAllowedUserIds,
+};

@@ -5,9 +5,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   AI_MODEL_LABELS,
+  IMAGE_PROVIDER_LABELS,
   MODEL_ADMIN_USER_ID,
   canSelectModel,
+  loadSelectedImageProvider,
   loadSelectedProvider,
+  saveSelectedImageProvider,
   saveSelectedProvider,
 } from "../src/model-selection.js";
 
@@ -27,4 +30,14 @@ test("persists and reloads the selected provider", () => {
   assert.equal(saveSelectedProvider(filePath, "openai"), "openai");
   assert.equal(loadSelectedProvider(filePath), "openai");
   assert.equal(JSON.parse(readFileSync(filePath, "utf8")).provider, "openai");
+});
+
+test("exposes and persists the Codex image provider", () => {
+  assert.equal(IMAGE_PROVIDER_LABELS.codex, "Codex OAuth (GPT Image 2)");
+  const directory = mkdtempSync(join(tmpdir(), "miq-image-provider-"));
+  const filePath = join(directory, "selection.json");
+  assert.equal(loadSelectedImageProvider(filePath), "cloudflare");
+  assert.equal(saveSelectedImageProvider(filePath, "codex"), "codex");
+  assert.equal(loadSelectedImageProvider(filePath), "codex");
+  assert.equal(JSON.parse(readFileSync(filePath, "utf8")).imageProvider, "codex");
 });

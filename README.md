@@ -38,6 +38,10 @@ Discord Developer Portalの対象Applicationで、次を確認してください
 
 `SOURCE_CHANNEL_IDS`にチャンネルIDをカンマ区切りで指定すると、指定したチャンネルだけを監視できます。空欄なら、このBotが読めるサーバー内の全チャンネルを監視します。
 
+### 白紙画像への書き込み
+
+書き込みたいメッセージへの返信として、`@Bot名 hakusihika` と送ると、返信元のアイコン・表示名・時刻・本文をDiscord風に白紙の画像へ合成して返します。カスタム絵文字と静止画スタンプにも対応し、長い本文は紙に収まるように自動で折り返し・省略します。
+
 ## Gemini超短文応答
 
 [Google AI Studio](https://aistudio.google.com/apikey)でAPIキーを作り、`.env`の`GEMINI_API_KEY`に設定します。Botを再起動後、DiscordでBotを直接メンションします。
@@ -72,17 +76,6 @@ GEMINI_FALLBACK_MINUTES=15
 `AI_PROVIDER=groq`にすると、Geminiの上限を待たずGroqを主プロバイダーとして使用します。`gemini`または未設定の場合はGeminiを主に使い、上限時のみGroqへ自動切り替えします。
 
 Geminiへのリクエストが直近1分で8回に達すると、上限へ近づいたものとしてGroqを優先します。Geminiが429または503を返した場合は、その質問を即座にGroqで再実行し、その後15分間はGroqを優先します。切り替え状況は`[ai] provider=... reason=...`ログで確認できます。
-
-## 午前1時の自動スリープ
-
-Windowsのローカル時刻で午前1時になったらBotを停止し、PCをスリープさせる設定です。
-
-```env
-SYSTEM_SLEEP_ENABLED=true
-SYSTEM_SLEEP_TIME=01:00
-```
-
-起動ログの`[ready] Windows sleep scheduled:`で次回の実行日時を確認できます。スリープ解除後もBotは停止したままなので、再開する場合は`npm.cmd start`を実行してください。無効化する場合は`SYSTEM_SLEEP_ENABLED=false`に変更します。
 
 ## 転送先の変更
 

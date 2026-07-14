@@ -10,9 +10,20 @@ const AI_MODEL_CHOICES = Object.freeze([
 const AI_MODEL_LABELS = Object.freeze(
   Object.fromEntries(AI_MODEL_CHOICES.map(({ name, value }) => [value, name])),
 );
+const IMAGE_PROVIDER_CHOICES = Object.freeze([
+  Object.freeze({ name: "Cloudflare FLUX", value: "cloudflare" }),
+  Object.freeze({ name: "Codex OAuth (GPT Image 2)", value: "codex" }),
+]);
+const IMAGE_PROVIDER_LABELS = Object.freeze(
+  Object.fromEntries(IMAGE_PROVIDER_CHOICES.map(({ name, value }) => [value, name])),
+);
 
 function normalizeProvider(value, fallback = "groq") {
   return AI_MODEL_CHOICES.some((choice) => choice.value === value) ? value : fallback;
+}
+
+function normalizeImageProvider(value, fallback = "cloudflare") {
+  return IMAGE_PROVIDER_CHOICES.some((choice) => choice.value === value) ? value : fallback;
 }
 
 function loadSelectedProvider(filePath, fallback = "groq") {
@@ -30,6 +41,21 @@ function saveSelectedProvider(filePath, provider) {
   return normalized;
 }
 
+function loadSelectedImageProvider(filePath, fallback = "cloudflare") {
+  try {
+    const data = JSON.parse(readFileSync(filePath, "utf8"));
+    return normalizeImageProvider(data.imageProvider, fallback);
+  } catch {
+    return normalizeImageProvider(fallback);
+  }
+}
+
+function saveSelectedImageProvider(filePath, provider) {
+  const normalized = normalizeImageProvider(provider);
+  writeFileSync(filePath, `${JSON.stringify({ imageProvider: normalized }, null, 2)}\n`, "utf8");
+  return normalized;
+}
+
 function canSelectModel(userId) {
   return userId === MODEL_ADMIN_USER_ID;
 }
@@ -37,9 +63,14 @@ function canSelectModel(userId) {
 export {
   AI_MODEL_CHOICES,
   AI_MODEL_LABELS,
+  IMAGE_PROVIDER_CHOICES,
+  IMAGE_PROVIDER_LABELS,
   MODEL_ADMIN_USER_ID,
   canSelectModel,
   loadSelectedProvider,
+  loadSelectedImageProvider,
   normalizeProvider,
+  normalizeImageProvider,
   saveSelectedProvider,
+  saveSelectedImageProvider,
 };

@@ -5,4 +5,7 @@ npm-debug.log*
 target-overrides.json
 community-data.json
 ai-model-selection.json
+image-provider-selection.json
+spotify-tokens.json
+image-generation-usage.json
 kimazu-preview.jpg

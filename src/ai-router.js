@@ -6,6 +6,11 @@ import {
 import { generateGroqShortReply } from "./groq.js";
 import { generateOpenAiShortReply } from "./openai.js";
 import { generateCodexOAuthShortReply } from "./codex-oauth.js";
+import {
+  AiOutputReviewError,
+  UnsafeAiOutputError,
+  assertLocallySafeAiOutput,
+} from "./ai-output-guard.js";
 
 function getLocalDateKey(timestamp) {
   const date = new Date(timestamp);
@@ -137,6 +142,7 @@ async function generateAiReply(
     groqGenerator = generateGroqShortReply,
     openaiGenerator = generateOpenAiShortReply,
     codexOAuthGenerator = generateCodexOAuthShortReply,
+    outputSafetyReviewer = null,
     now = Date.now(),
   },
 ) {
@@ -176,9 +182,26 @@ async function generateAiReply(
     }
   };
 
+  const finalizeResult = async (result) => {
+    assertLocallySafeAiOutput(result.text);
+    if (typeof outputSafetyReviewer === "function") {
+      let review;
+      try {
+        review = await outputSafetyReviewer(result.text);
+      } catch (error) {
+        if (error?.code === "AI_OUTPUT_REVIEW_FAILED") throw error;
+        throw new AiOutputReviewError(error?.message ?? "AI output safety review failed.");
+      }
+      if (!review || review.allowed !== true) {
+        throw new UnsafeAiOutputError(review?.category ?? "other_unsafe");
+      }
+    }
+    return result;
+  };
+
   if (preferredProvider === "openai") {
     if (!canUseOpenAi) throw new Error("ChatGPT/Codex OAuth is not configured.");
-    return {
+    return finalizeResult({
       text: openaiOAuthAvailable
         ? await codexOAuthGenerator(prompt, {
             model: openaiModel,
@@ -196,32 +219,32 @@ async function generateAiReply(
           }),
       provider: "openai",
       reason: openaiOAuthAvailable ? "codex-oauth" : "configured-primary",
-    };
+    });
   }
 
   if (preferredProvider === "groq" && canUseGroq) {
     const result = await generateGroqCascade(groqModel);
-    return {
+    return finalizeResult({
       text: result.text,
       provider: "groq",
       model: result.model,
       reason: result.usedModelFallback ? "groq-model-fallback" : "configured-primary",
-    };
+    });
   }
 
   if ((!canUseGemini || tracker.shouldPreferGroq(now)) && canUseGroq) {
     const result = await generateGroqCascade(qwenModel ?? groqModel);
-    return {
+    return finalizeResult({
       text: result.text,
       provider: "groq",
       model: result.model,
       reason: canUseGemini ? "gemini-soft-limit" : "gemini-unavailable",
-    };
+    });
   }
 
   tracker.recordGeminiRequest(now);
   try {
-    return {
+    return finalizeResult({
       text: await geminiGenerator(prompt, {
         apiKey: geminiApiKey,
         model: geminiModel,
@@ -232,19 +255,19 @@ async function generateAiReply(
       }),
       provider: "gemini",
       reason: "primary",
-    };
+    });
   } catch (error) {
     const shouldFallback = isGeminiLimitError(error) || isGeminiUnavailableError(error);
     if (!shouldFallback || !canUseGroq) throw error;
 
     tracker.openFallbackCircuit(now);
     const result = await generateGroqCascade(qwenModel ?? groqModel);
-    return {
+    return finalizeResult({
       text: result.text,
       provider: "groq",
       model: result.model,
       reason: isGeminiLimitError(error) ? "gemini-limit" : "gemini-unavailable",
-    };
+    });
   }
 }
 

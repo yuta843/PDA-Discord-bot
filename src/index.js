@@ -7,6 +7,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   Client,
+  EmbedBuilder,
   Events,
   GatewayIntentBits,
   MessageFlags,
@@ -28,13 +29,24 @@ import {
   moderatePrompt,
 } from "./gemini.js";
 import { GeminiUsageTracker, generateAiReply } from "./ai-router.js";
+import {
+  reviewAiOutputWithCodexOAuth,
+  reviewAiOutputWithFallbacks,
+  reviewAiOutputWithGemini,
+  reviewAiOutputWithGroq,
+  reviewAiOutputWithOpenAi,
+} from "./gemini-output-review.js";
 import { DEFAULT_GROQ_MODEL, isGroqLimitError } from "./groq.js";
 import {
   DEFAULT_OPENAI_MODEL,
   isOpenAiLimitError,
   isOpenAiUnavailableError,
 } from "./openai.js";
-import { DEFAULT_CODEX_MODEL, isCodexOAuthAvailable } from "./codex-oauth.js";
+import {
+  CodexImageService,
+  DEFAULT_CODEX_MODEL,
+  isCodexOAuthAvailable,
+} from "./codex-oauth.js";
 import { ImageAccessLimiter } from "./image-access.js";
 import { enrichPromptWithTweets } from "./tweet-context.js";
 import { enrichPromptWithWebPages } from "./web-fetch.js";
@@ -46,13 +58,15 @@ import {
 } from "./ai-battle.js";
 import {
   AI_MODEL_LABELS,
+  IMAGE_PROVIDER_LABELS,
   canSelectModel,
+  loadSelectedImageProvider,
   loadSelectedProvider,
+  saveSelectedImageProvider,
   saveSelectedProvider,
 } from "./model-selection.js";
 import { buildServerInviteUrl } from "./invite.js";
 import { getImageAssets, isQuoteBotAuthor, shouldRelay } from "./relay.js";
-import { launchWindowsSleepHelper, scheduleSystemSleep } from "./system-sleep.js";
 import { ConversationHistory } from "./conversation-history.js";
 import {
   DEFAULT_CHANNEL_HISTORY_LIMIT,
@@ -60,6 +74,7 @@ import {
 } from "./channel-history.js";
 import { AI_SETTING_LABELS, AiSettingsStore } from "./ai-settings.js";
 import {
+  canChangeAiStyle,
   canChangeAiSettings,
   parseAiSettingsAllowedUserIds,
 } from "./ai-settings-access.js";
@@ -70,12 +85,22 @@ import { buildAhooNewsPrompt, formatAhooNewsReply } from "./ahoo-news.js";
 import { parsePersonaSwitchCommand } from "./personas.js";
 import {
   cleanKimazuMessageText,
+  createHakusihikaImage,
   createKimazuImage,
+  downloadHakusihikaAssets,
+  downloadHakusihikaImages,
   downloadImage,
+  isHakusihikaMentionCommand,
   isKimazuMentionCommand,
+  restoreCustomEmojiTokens,
 } from "./kimazu.js";
 import { AHOO_NEWS_TASK_INSTRUCTION, SUMMARY_TASK_INSTRUCTION } from "./ai-task-instructions.js";
 import { CommunityStore } from "./community-store.js";
+import {
+  COIN_NAME,
+  MAX_ROULETTE_BET,
+  formatCoinAmount,
+} from "./economy.js";
 import {
   castPollVote,
   closePoll,
@@ -94,9 +119,30 @@ import {
   DEFAULT_SUMMARY_COUNT,
   parseSummaryCount,
 } from "./summary.js";
+import {
+  DEFAULT_HISTORY_LIMIT,
+  SpotifyAuthorizationRequiredError,
+  SpotifyService,
+  formatSpotifyHistory,
+} from "./spotify.js";
+import {
+  extractSpotifyTrackUrl,
+  fetchSpotifyTrackMetadata,
+} from "./spotify-link.js";
+import {
+  CLOUDFLARE_FLUX_MODEL,
+  DEFAULT_IMAGE_DAILY_LIMIT,
+  CloudflareImageService,
+  DailyImageUsageStore,
+} from "./cloudflare-image.js";
 
 const DEFAULT_QUOTE_BOT_ID = "949479338275913799";
 const QWEN_GROQ_MODEL = "qwen/qwen3.6-27b";
+const AI_MENTION_ALLOWED_BOT_IDS = new Set([
+  "1420463943549321256",
+  "909232542639607859",
+  "1526014470806048839",
+]);
 
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
@@ -145,12 +191,52 @@ const geminiFallbackMinutes = Number.parseInt(
   process.env.GEMINI_FALLBACK_MINUTES ?? "15",
   10,
 );
-const systemSleepEnabled = process.env.SYSTEM_SLEEP_ENABLED === "true";
-const systemSleepTime = process.env.SYSTEM_SLEEP_TIME?.trim() || "01:00";
 const targetOverridesPath = new URL("../target-overrides.json", import.meta.url);
 const communityDataPath = fileURLToPath(new URL("../community-data.json", import.meta.url));
 const modelSelectionPath = fileURLToPath(new URL("../ai-model-selection.json", import.meta.url));
+const imageProviderSelectionPath = fileURLToPath(
+  new URL("../image-provider-selection.json", import.meta.url),
+);
+const spotifyClientId = process.env.SPOTIFY_CLIENT_ID?.trim();
+const spotifyClientSecret = process.env.SPOTIFY_CLIENT_SECRET?.trim();
+const spotifyRedirectUri = process.env.SPOTIFY_REDIRECT_URI?.trim();
+const spotifyTokenPath = process.env.SPOTIFY_TOKEN_PATH?.trim() ||
+  fileURLToPath(new URL("../spotify-tokens.json", import.meta.url));
+const spotifyCallbackHost = process.env.SPOTIFY_CALLBACK_HOST?.trim() || "127.0.0.1";
+const parsedSpotifyCallbackPort = Number.parseInt(process.env.SPOTIFY_CALLBACK_PORT ?? "", 10);
+const spotifyCallbackPort = Number.isInteger(parsedSpotifyCallbackPort)
+  ? parsedSpotifyCallbackPort
+  : null;
+const cloudflareAccountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
+const cloudflareApiToken = process.env.CLOUDFLARE_API_TOKEN?.trim();
+const imageUsagePath = process.env.IMAGE_GENERATION_USAGE_PATH?.trim() ||
+  fileURLToPath(new URL("../image-generation-usage.json", import.meta.url));
+const spotify = new SpotifyService({
+  clientId: spotifyClientId,
+  clientSecret: spotifyClientSecret,
+  redirectUri: spotifyRedirectUri,
+  tokenPath: spotifyTokenPath,
+});
+const cloudflareImage = new CloudflareImageService({
+  accountId: cloudflareAccountId,
+  apiToken: cloudflareApiToken,
+  model: CLOUDFLARE_FLUX_MODEL,
+});
+const codexImage = new CodexImageService({ enabled: codexOAuthAvailable });
+const imageUsageStore = new DailyImageUsageStore({
+  filePath: imageUsagePath,
+  limit: DEFAULT_IMAGE_DAILY_LIMIT,
+});
 let activeAiProvider = loadSelectedProvider(modelSelectionPath, configuredAiProvider);
+const defaultImageProvider = cloudflareImage.isConfigured()
+  ? "cloudflare"
+  : codexOAuthAvailable
+    ? "codex"
+    : "cloudflare";
+let activeImageProvider = loadSelectedImageProvider(
+  imageProviderSelectionPath,
+  defaultImageProvider,
+);
 
 function isProviderAvailable(provider) {
   return {
@@ -159,6 +245,17 @@ function isProviderAvailable(provider) {
     qwen: Boolean(groqApiKey),
     openai: codexOAuthAvailable || Boolean(openaiApiKey),
   }[provider] ?? false;
+}
+
+function isImageProviderAvailable(provider) {
+  return {
+    cloudflare: cloudflareImage.isConfigured(),
+    codex: codexImage.isConfigured(),
+  }[provider] ?? false;
+}
+
+function getActiveImageService() {
+  return activeImageProvider === "codex" ? codexImage : cloudflareImage;
 }
 
 function getActiveProvider() {
@@ -222,10 +319,60 @@ const geminiUsageTracker = new GeminiUsageTracker({
       ? geminiFallbackMinutes
       : 15,
 });
+const outputSafetyReviewers = [
+  geminiApiKey
+    ? {
+        name: "gemini",
+        review: (text) => {
+          geminiUsageTracker.recordGeminiRequest();
+          return reviewAiOutputWithGemini(text, {
+            apiKey: geminiApiKey,
+            model: geminiModel,
+            onUsage: (usage) => geminiUsageTracker.recordGeminiUsage(usage),
+          });
+        },
+      }
+    : null,
+  groqApiKey
+    ? {
+        name: "groq",
+        review: (text) => reviewAiOutputWithGroq(text, {
+          apiKey: groqApiKey,
+          model: getActiveGroqModel(),
+        }),
+      }
+    : null,
+  codexOAuthAvailable
+    ? {
+        name: "openai-oauth",
+        review: (text) => reviewAiOutputWithCodexOAuth(text, { model: openaiModel }),
+      }
+    : null,
+  openaiApiKey
+    ? {
+        name: "openai-api",
+        review: (text) => reviewAiOutputWithOpenAi(text, {
+          apiKey: openaiApiKey,
+          model: openaiModel,
+        }),
+      }
+    : null,
+].filter(Boolean);
+const outputSafetyReviewer = outputSafetyReviewers.length > 0
+  ? (text) => reviewAiOutputWithFallbacks(text, outputSafetyReviewers)
+  : null;
 
 const DEFAULT_POLL_DURATION_MINUTES = 60;
 const COMMUNITY_TIMER_INTERVAL_MS = 15_000;
+const SPOTIFY_HISTORY_PAGE_SIZE = 5;
+const SPOTIFY_HISTORY_PAGE_TTL_MS = 15 * 60 * 1000;
 let communityTimer = null;
+const spotifyHistoryPages = new Map();
+const spotifyTrackLinkInFlight = new Set();
+
+function isUnknownInteractionError(error) {
+  return error?.code === 10062;
+}
 
 function getAiConversationKey({ guildId, channelId, userId }) {
   return [guildId ?? "dm", channelId, userId].join(":");
@@ -274,11 +421,7 @@ function formatSettings(settings) {
 }
 
 async function handlePersonaSwitchCommand(message, persona) {
-  if (
-    !canChangeAiSettings(message.author.id, aiSettingsAllowedUserIds, {
-      canManageGuild: message.member?.permissions.has(PermissionFlagsBits.ManageGuild) ?? false,
-    })
-  ) {
+  if (!canChangeAiStyle(message.author.id)) {
     await message.reply({
       content: "AI設定を変更する権限がありません。",
       allowedMentions: { repliedUser: false, parse: [] },
@@ -579,6 +722,7 @@ async function handleAiPrompt(
       imageAssets,
       onGeminiUsage: (usage) => geminiUsageTracker.recordGeminiUsage(usage),
       tracker: geminiUsageTracker,
+      outputSafetyReviewer,
     });
     aiConversationHistory.add(conversationKey, prompt, result.text);
     if (message.guildId) {
@@ -601,7 +745,11 @@ async function handleAiPrompt(
   } catch (error) {
     console.error(`[ai] Failed for message ${message.id}:`, error);
     let errorMessage = "AI応答エラー。";
-    if (isGeminiLimitError(error) || isGroqLimitError(error) || isOpenAiLimitError(error)) {
+    if (error?.code === "UNSAFE_AI_OUTPUT") {
+      errorMessage = "安全確認のため、そのAI応答は送信しませんでした。";
+    } else if (error?.code === "AI_OUTPUT_REVIEW_FAILED") {
+      errorMessage = "安全確認に失敗したため、そのAI応答は送信しませんでした。";
+    } else if (isGeminiLimitError(error) || isGroqLimitError(error) || isOpenAiLimitError(error)) {
       errorMessage = "AIの利用上限です。後で試して。";
     } else if (isGeminiUnavailableError(error) || isOpenAiUnavailableError(error)) {
       errorMessage = "AIが混雑中。後で試して。";
@@ -617,7 +765,8 @@ async function handleAiPrompt(
 }
 
 async function handleGeminiMention(message) {
-  if (message.author.bot || !client.user) return false;
+  if (!client.user || message.author.id === client.user.id) return false;
+  if (message.author.bot && !AI_MENTION_ALLOWED_BOT_IDS.has(message.author.id)) return false;
   const prompt = await extractAiPrompt(message, client.user.id);
   if (prompt === null) return false;
   const imageAssets = getImageAssets(message);
@@ -632,6 +781,38 @@ async function handleBattleMessage(message) {
     mentionUserIds: [BATTLE_TARGET_BOT_ID],
     bypassCooldown: true,
   });
+}
+
+async function handleSpotifyTrackLink(message) {
+  if (message.author?.bot || !message.guild || !message.content) return false;
+
+  const trackUrl = extractSpotifyTrackUrl(message.content);
+  if (!trackUrl) return false;
+  if (spotifyTrackLinkInFlight.has(message.id)) return true;
+
+  spotifyTrackLinkInFlight.add(message.id);
+  try {
+    const metadata = await fetchSpotifyTrackMetadata(trackUrl);
+    const embed = new EmbedBuilder()
+      .setColor(0x1db954)
+      .setTitle(`🎵 ${metadata.title}`.slice(0, 256))
+      .setURL(metadata.providerUrl)
+      .setDescription(metadata.authorName ? `アーティスト: ${metadata.authorName}` : "Spotify")
+      .setFooter({ text: "Spotify" });
+
+    if (metadata.thumbnailUrl) embed.setImage(metadata.thumbnailUrl);
+
+    await message.reply({
+      embeds: [embed],
+      allowedMentions: { repliedUser: false, parse: [] },
+    });
+  } catch (error) {
+    console.warn(`[spotify-link] Could not render track for message ${message.id}:`, error);
+  } finally {
+    spotifyTrackLinkInFlight.delete(message.id);
+  }
+
+  return true;
 }
 
 async function handleAnkCommand(message, command) {
@@ -692,6 +873,11 @@ async function handleAnkCandidate(message) {
 
   await message.react("👉").catch((error) => {
     console.error(`[ank] Could not react to selected message ${message.id}:`, error.message);
+  });
+  communityStore.recordEconomyActivity({
+    guildId: message.guildId,
+    userId: message.author.id,
+    activity: "ankWins",
   });
   await message.reply({
     content: `安価成立（${result.targetCount}件目）。${message.author} さん、お願いします。`,
@@ -795,6 +981,7 @@ async function handleSummaryCommand(interaction) {
       },
       onGeminiUsage: (usage) => geminiUsageTracker.recordGeminiUsage(usage),
       tracker: geminiUsageTracker,
+      outputSafetyReviewer,
     });
 
     communityStore.incrementStats({
@@ -814,7 +1001,11 @@ async function handleSummaryCommand(interaction) {
   } catch (error) {
     console.error(`[summary] Failed in channel ${interaction.channelId}:`, error);
     let errorMessage = "要約中にエラーが発生しました。";
-    if (isGeminiLimitError(error) || isGroqLimitError(error) || isOpenAiLimitError(error)) {
+    if (error?.code === "UNSAFE_AI_OUTPUT") {
+      errorMessage = "安全確認のため、その要約は送信しませんでした。";
+    } else if (error?.code === "AI_OUTPUT_REVIEW_FAILED") {
+      errorMessage = "安全確認に失敗したため、その要約は送信しませんでした。";
+    } else if (isGeminiLimitError(error) || isGroqLimitError(error) || isOpenAiLimitError(error)) {
       errorMessage = "AIの利用上限です。少し待ってから試してください。";
     } else if (isGeminiUnavailableError(error) || isOpenAiUnavailableError(error)) {
       errorMessage = "AIが混雑しています。少し待ってから試してください。";
@@ -893,6 +1084,7 @@ async function handleAhooNewsCommand(interaction) {
       },
       onGeminiUsage: (usage) => geminiUsageTracker.recordGeminiUsage(usage),
       tracker: geminiUsageTracker,
+      outputSafetyReviewer,
     });
 
     communityStore.incrementStats({
@@ -911,7 +1103,11 @@ async function handleAhooNewsCommand(interaction) {
   } catch (error) {
     console.error(`[ahoo] Failed in channel ${interaction.channelId}:`, error);
     let errorMessage = "架空ニュースの生成中にエラーが発生しました。";
-    if (isGeminiLimitError(error) || isGroqLimitError(error) || isOpenAiLimitError(error)) {
+    if (error?.code === "UNSAFE_AI_OUTPUT") {
+      errorMessage = "安全確認のため、そのニュースは送信しませんでした。";
+    } else if (error?.code === "AI_OUTPUT_REVIEW_FAILED") {
+      errorMessage = "安全確認に失敗したため、そのニュースは送信しませんでした。";
+    } else if (isGeminiLimitError(error) || isGroqLimitError(error) || isOpenAiLimitError(error)) {
       errorMessage = "AIの利用上限です。少し待ってから試してください。";
     } else if (isGeminiUnavailableError(error) || isOpenAiUnavailableError(error)) {
       errorMessage = "AIが混雑しています。少し待ってから試してください。";
@@ -1024,6 +1220,13 @@ async function handlePollButton(interaction) {
       userId: interaction.user.id,
       event: "pollVotes",
     });
+    if (result.previousOptionIndex === undefined) {
+      communityStore.recordEconomyActivity({
+        guildId: poll.guildId,
+        userId: interaction.user.id,
+        activity: "pollVotes",
+      });
+    }
   }
   await interaction.reply({
     content: result.changed ? "投票を受け付けました。" : "すでにこの選択肢へ投票しています。",
@@ -1127,6 +1330,233 @@ async function handleRemindCommand(interaction) {
   return true;
 }
 
+async function handleBalanceCommand(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "このコマンドはサーバー内で実行してください。",
+    });
+    return true;
+  }
+
+  const target = interaction.options.getUser("user") ?? interaction.user;
+  const wallet = communityStore.getWallet(interaction.guildId, target.id);
+  const label = target.id === interaction.user.id ? "あなた" : `<@${target.id}>`;
+  await interaction.reply({
+    content: `${label}の${COIN_NAME}残高: ${formatCoinAmount(wallet.balance)}\n` +
+      `累計獲得: ${formatCoinAmount(wallet.totalEarned)} / 累計消費: ${formatCoinAmount(wallet.totalSpent)}`,
+    allowedMentions: { parse: [], users: target.id === interaction.user.id ? [] : [target.id] },
+  });
+  return true;
+}
+
+async function handleDailyCommand(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "このコマンドはサーバー内で実行してください。",
+    });
+    return true;
+  }
+
+  const result = communityStore.claimDaily({
+    guildId: interaction.guildId,
+    userId: interaction.user.id,
+  });
+  if (!result.ok && result.reason === "cooldown") {
+    await interaction.reply({
+      content: `dailyはまだ受け取れません。次回: <t:${Math.floor((Date.now() + result.retryAfterMs) / 1000)}:R>`,
+    });
+    return true;
+  }
+  if (!result.ok) {
+    await interaction.reply({
+      content: "daily報酬を受け取れませんでした。",
+    });
+    return true;
+  }
+
+  await interaction.reply({
+    content: `daily報酬として ${formatCoinAmount(result.reward.amount)} を受け取りました。\n` +
+      `連続 ${result.streak}日目 / 残高 ${formatCoinAmount(result.wallet.balance)}`,
+  });
+  return true;
+}
+
+async function handleWorkCommand(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "このコマンドはサーバー内で実行してください。",
+    });
+    return true;
+  }
+
+  const result = communityStore.claimWork({
+    guildId: interaction.guildId,
+    userId: interaction.user.id,
+  });
+  if (!result.ok && result.reason === "cooldown") {
+    await interaction.reply({
+      content: `まだ仕事中です。次に働けるのは <t:${Math.floor((Date.now() + result.retryAfterMs) / 1000)}:R>`,
+    });
+    return true;
+  }
+  if (!result.ok) {
+    await interaction.reply({
+      content: "仕事報酬を受け取れませんでした。",
+    });
+    return true;
+  }
+
+  await interaction.reply({
+    content: `仕事を終えて ${formatCoinAmount(result.reward)} 稼ぎました。\n` +
+      `残高: ${formatCoinAmount(result.wallet.balance)}`,
+  });
+  return true;
+}
+
+function formatQuestTasks(tasks) {
+  return tasks
+    .map((task) => {
+      const state = task.claimed ? "受取済み" : task.completed ? "達成・受取可能" : "進行中";
+      return `・${task.label}: ${task.progress}/${task.target} (${state}, ${formatCoinAmount(task.reward)})`;
+    })
+    .join("\n");
+}
+
+async function handleQuestCommand(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "このコマンドはサーバー内で実行してください。",
+    });
+    return true;
+  }
+
+  const result = communityStore.claimDailyQuests({
+    guildId: interaction.guildId,
+    userId: interaction.user.id,
+  });
+  const awards = result.awards.length > 0
+    ? `\n\n今回の報酬: ${formatCoinAmount(result.totalAwarded)}`
+    : "\n\n達成済みで未受取のクエストはありません。";
+  await interaction.reply({
+    content: `🎯 今日のクエスト\n${formatQuestTasks(result.tasks)}${awards}\n残高: ${formatCoinAmount(result.wallet.balance)}`,
+  });
+  return true;
+}
+
+async function handleLeaderboardCommand(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "このコマンドはサーバー内で実行してください。",
+    });
+    return true;
+  }
+
+  const leaderboard = communityStore.getLeaderboard(interaction.guildId, 10);
+  const content = leaderboard.length === 0
+    ? "まだランキングに参加しているユーザーはいません。"
+    : [
+        "🏆 miq coin leaderboard",
+        ...leaderboard.map((entry, index) =>
+          `${index + 1}. <@${entry.userId}> — ${formatCoinAmount(entry.balance)}`,
+        ),
+      ].join("\n");
+  await interaction.reply({
+    content,
+    allowedMentions: { parse: [], users: leaderboard.map(({ userId }) => userId) },
+  });
+  return true;
+}
+
+async function handlePayCommand(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "このコマンドはサーバー内で実行してください。",
+    });
+    return true;
+  }
+
+  const recipient = interaction.options.getUser("user", true);
+  const amount = interaction.options.getInteger("amount", true);
+  if (recipient.bot || recipient.id === interaction.user.id) {
+    await interaction.reply({
+      content: "botや自分自身には送金できません。",
+    });
+    return true;
+  }
+
+  const result = communityStore.transferEconomy({
+    guildId: interaction.guildId,
+    fromUserId: interaction.user.id,
+    toUserId: recipient.id,
+    amount,
+    transactionId: interaction.id,
+  });
+  if (!result.ok) {
+    const content = result.reason === "insufficient_funds"
+      ? `残高不足です。現在の残高: ${formatCoinAmount(result.wallet.balance)}`
+      : "送金できませんでした。";
+    await interaction.reply({ content });
+    return true;
+  }
+
+  await interaction.reply({
+    content: `<@${recipient.id}> に ${formatCoinAmount(result.amount)} を送りました。残高: ${formatCoinAmount(result.sender.balance)}`,
+    allowedMentions: { parse: [], users: [recipient.id] },
+  });
+  return true;
+}
+
+async function handleRouletteCommand(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "このコマンドはサーバー内で実行してください。",
+    });
+    return true;
+  }
+
+  const amount = interaction.options.getInteger("amount", true);
+  const choice = interaction.options.getString("choice", true);
+  const number = interaction.options.getInteger("number");
+  if (choice === "number" && number === null) {
+    await interaction.reply({
+      content: "数字に賭ける場合は number に 0〜36 を指定してください。",
+    });
+    return true;
+  }
+
+  try {
+    const result = communityStore.playRoulette({
+      guildId: interaction.guildId,
+      userId: interaction.user.id,
+      amount,
+      choice,
+      number,
+      transactionId: interaction.id,
+    });
+    if (!result.ok) {
+      const content = result.reason === "insufficient_funds"
+        ? `残高不足です。現在の残高: ${formatCoinAmount(result.wallet.balance)}`
+        : `ルーレットを実行できませんでした（上限 ${formatCoinAmount(MAX_ROULETTE_BET)}）。`;
+      await interaction.reply({ content });
+      return true;
+    }
+
+    const roulette = result.roulette;
+    const outcome = `${roulette.rolledNumber} (${roulette.color})`;
+    const resultText = roulette.won
+      ? `🎰 当たり！ ${outcome}\n配当 ${formatCoinAmount(roulette.payout)} / 純利益 ${formatCoinAmount(roulette.netChange)}`
+      : `🎰 はずれ…… ${outcome}\n${formatCoinAmount(roulette.amount)} を失いました。`;
+    await interaction.reply({
+      content: `${resultText}\n残高: ${formatCoinAmount(result.wallet.balance)}`,
+    });
+  } catch (error) {
+    await interaction.reply({
+      content: error.message || "ルーレットの指定が正しくありません。",
+    });
+  }
+  return true;
+}
+
 async function handleStatsCommand(interaction) {
   if (!interaction.guild) {
     await interaction.reply({
@@ -1162,6 +1592,276 @@ async function handleQuotesCommand(interaction) {
     flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
+  return true;
+}
+
+function cleanupSpotifyHistoryPages(now = Date.now()) {
+  for (const [id, pageState] of spotifyHistoryPages) {
+    if (pageState.expiresAt <= now) spotifyHistoryPages.delete(id);
+  }
+}
+
+function rememberSpotifyHistory(items, displayName) {
+  cleanupSpotifyHistoryPages();
+  const id = randomUUID();
+  spotifyHistoryPages.set(id, {
+    id,
+    items,
+    displayName,
+    expiresAt: Date.now() + SPOTIFY_HISTORY_PAGE_TTL_MS,
+  });
+  return id;
+}
+
+function buildSpotifyHistoryEmbed(pageState, page) {
+  const totalPages = Math.max(1, Math.ceil(pageState.items.length / SPOTIFY_HISTORY_PAGE_SIZE));
+  const safePage = Math.min(Math.max(page, 0), totalPages - 1);
+  const startIndex = safePage * SPOTIFY_HISTORY_PAGE_SIZE;
+  const pageItems = pageState.items.slice(startIndex, startIndex + SPOTIFY_HISTORY_PAGE_SIZE);
+  const embed = new EmbedBuilder()
+    .setColor(0x1db954)
+    .setTitle(`Spotify history: ${pageState.displayName ?? "Spotify"}`)
+    .setDescription(formatSpotifyHistory(pageItems, startIndex))
+    .setFooter({ text: `Page ${safePage + 1}/${totalPages} · Spotify履歴をサーバー全体に公開中` });
+  const components = [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`spotify-history:${pageState.id}:${safePage}:prev`)
+        .setLabel("前へ")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(safePage === 0),
+      new ButtonBuilder()
+        .setCustomId(`spotify-history:${pageState.id}:${safePage}:next`)
+        .setLabel("次へ")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(safePage >= totalPages - 1),
+    ),
+  ];
+  return { embed, components, page: safePage };
+}
+
+async function handleSpotifyHistoryButton(interaction) {
+  const match = interaction.customId.match(/^spotify-history:([^:]+):(\d+):(prev|next)$/);
+  if (!match) return false;
+
+  const pageState = spotifyHistoryPages.get(match[1]);
+  if (!pageState || pageState.expiresAt <= Date.now()) {
+    spotifyHistoryPages.delete(match[1]);
+    await interaction.reply({
+      content: "このSpotify履歴ページは期限切れです。もう一度 `/spotify history` を実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  const currentPage = Number.parseInt(match[2], 10);
+  const requestedPage = currentPage + (match[3] === "next" ? 1 : -1);
+  const rendered = buildSpotifyHistoryEmbed(pageState, requestedPage);
+  try {
+    await interaction.update({
+      embeds: [rendered.embed],
+      components: rendered.components,
+      allowedMentions: { parse: [] },
+    });
+  } catch (error) {
+    if (isUnknownInteractionError(error)) {
+      console.warn("[spotify] Page button interaction expired before it could be updated");
+      return true;
+    }
+    throw error;
+  }
+  return true;
+}
+
+async function handleSpotifyCommand(interaction) {
+  const subcommand = interaction.options.getSubcommand();
+
+  if (!spotify.isConfigured()) {
+    await interaction.reply({
+      content: "Spotify連携はまだ設定されていません。管理者がSPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET / SPOTIFY_REDIRECT_URIを設定してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  if (subcommand === "connect") {
+    const authorizationUrl = spotify.createAuthorizationUrl(interaction.user.id);
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setLabel("Spotifyと連携する")
+        .setStyle(ButtonStyle.Link)
+        .setURL(authorizationUrl),
+    );
+    await interaction.reply({
+      content: "Spotifyの再生履歴をサーバーに表示するには、下のボタンからアカウントを連携してください。",
+      components: [row],
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  if (subcommand === "status") {
+    const connection = spotify.getConnection(interaction.user.id);
+    await interaction.reply({
+      content: connection
+        ? `Spotify連携中: ${connection.displayName}`
+        : "Spotifyは未連携です。`/spotify connect` から連携してください。",
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
+    return true;
+  }
+
+  if (subcommand === "disconnect") {
+    const disconnected = spotify.disconnect(interaction.user.id);
+    await interaction.reply({
+      content: disconnected
+        ? "Spotifyの連携を解除しました。保存していたアクセストークンも削除しました。"
+        : "Spotifyは連携されていません。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "履歴の表示はサーバー内で実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  if (!spotify.getConnection(interaction.user.id)) {
+    await interaction.reply({
+      content: "Spotifyが未連携です。まず `/spotify connect` を実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  const count = interaction.options.getInteger("count") ?? DEFAULT_HISTORY_LIMIT;
+  try {
+    await interaction.deferReply();
+  } catch (error) {
+    if (isUnknownInteractionError(error)) {
+      console.warn("[spotify] History interaction expired before it could be acknowledged");
+      return true;
+    }
+    throw error;
+  }
+  try {
+    const items = await spotify.getRecentlyPlayed(interaction.user.id, count);
+    const connection = spotify.getConnection(interaction.user.id);
+    const historyId = rememberSpotifyHistory(items, connection?.displayName ?? "Spotify");
+    const pageState = spotifyHistoryPages.get(historyId);
+    const rendered = buildSpotifyHistoryEmbed(pageState, 0);
+    const embed = rendered.embed
+      .setColor(0x1db954)
+      .setTitle(`🎧 ${connection?.displayName ?? "Spotify"} の最近の再生履歴`)
+      .setDescription(formatSpotifyHistory(items.slice(0, SPOTIFY_HISTORY_PAGE_SIZE), 0))
+      .setFooter({ text: "Spotifyの履歴をサーバー全体に公開しています" });
+    await interaction.editReply({
+      embeds: [embed],
+      components: rendered.components,
+      allowedMentions: { parse: [] },
+    });
+  } catch (error) {
+    console.error(`[spotify] Could not fetch history for Discord user ${interaction.user.id}:`, error);
+    const content = error instanceof SpotifyAuthorizationRequiredError
+      ? "Spotifyの認証が切れています。もう一度 `/spotify connect` を実行してください。"
+      : error.status === 429
+        ? "Spotify APIの利用制限に達しました。少し待ってから再試行してください。"
+        : "Spotifyの再生履歴を取得できませんでした。しばらくしてから再試行してください。";
+    await interaction.editReply({
+      content,
+      allowedMentions: { parse: [] },
+    });
+  }
+  return true;
+}
+
+async function handleImageCommand(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "画像生成はサーバー内で実行してください。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  const imageService = getActiveImageService();
+  if (!imageService.isConfigured()) {
+    await interaction.reply({
+      content: `現在の画像生成プロバイダー（${IMAGE_PROVIDER_LABELS[activeImageProvider] ?? activeImageProvider}）が利用できません。管理者が設定を確認してください。`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  const prompt = interaction.options.getString("prompt", true).trim();
+  const moderation = moderatePrompt(prompt);
+  if (!moderation.allowed) {
+    await interaction.reply({
+      content: moderation.message,
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
+    return true;
+  }
+
+  const reservation = imageUsageStore.tryConsume(interaction.user.id);
+  if (!reservation.allowed) {
+    await interaction.reply({
+      content: `今日は画像生成を${reservation.limit}枚使い切っています。明日（日本時間）にリセットされます。`,
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
+    return true;
+  }
+
+  try {
+    await interaction.deferReply();
+  } catch (error) {
+    imageUsageStore.refund(interaction.user.id, reservation.dateKey);
+    if (isUnknownInteractionError(error)) {
+      console.warn("[image] Image interaction expired before it could be acknowledged");
+      return true;
+    }
+    throw error;
+  }
+
+  let image;
+  try {
+    image = await imageService.generate(prompt, { steps: 4 });
+  } catch (error) {
+    imageUsageStore.refund(interaction.user.id, reservation.dateKey);
+    console.error(`[image] Could not generate an image for Discord user ${interaction.user.id}:`, error);
+    try {
+      await interaction.editReply({
+        content: "画像生成に失敗しました。少し待ってからもう一度試してください。",
+        allowedMentions: { parse: [] },
+      });
+    } catch (editError) {
+      if (!isUnknownInteractionError(editError)) throw editError;
+    }
+    return true;
+  }
+
+  try {
+    await interaction.editReply({
+      content: reservation.unlimited
+        ? "🎨 画像を生成しました（あなたは無制限）"
+        : `🎨 画像を生成しました（本日あと${reservation.remaining}枚）`,
+      files: [{ attachment: image, name: "generated.png" }],
+      allowedMentions: { parse: [] },
+    });
+  } catch (error) {
+    if (isUnknownInteractionError(error)) {
+      console.warn("[image] Image interaction expired before the result could be sent");
+      return true;
+    }
+    throw error;
+  }
   return true;
 }
 
@@ -1227,20 +1927,6 @@ function startCommunityScheduler() {
   }, COMMUNITY_TIMER_INTERVAL_MS);
   communityTimer.unref?.();
   processCommunityJobs().catch((error) => console.error("[community] Initial job failed:", error));
-}
-
-async function stopBotAndSleep() {
-  console.log(`[sleep] ${systemSleepTime} reached. Stopping bot and suspending Windows.`);
-  try {
-    if (communityTimer) clearInterval(communityTimer);
-    communityTimer = null;
-    communityStore.close();
-    launchWindowsSleepHelper();
-    client.destroy();
-    setTimeout(() => process.exit(0), 500).unref();
-  } catch (error) {
-    console.error("[sleep] Could not suspend Windows:", error);
-  }
 }
 
 async function changeTargetChannel({ guild, canManageGuild, channelQuery, reply }) {
@@ -1325,25 +2011,36 @@ client.once(Events.ClientReady, async (readyClient) => {
     `[ready] Gemini soft limit: ${geminiUsageTracker.softRequestsPerMinute} requests/minute; ` +
       `fallback circuit: ${geminiFallbackMinutes} minutes`,
   );
-  if (systemSleepEnabled) {
-    try {
-      const { next } = scheduleSystemSleep(systemSleepTime, stopBotAndSleep);
-      console.log(`[ready] Windows sleep scheduled: ${next.toLocaleString()}`);
-    } catch (error) {
-      console.error(`[ready] Windows sleep schedule is invalid: ${error.message}`);
-    }
-  } else {
-    console.log("[ready] Windows sleep schedule: disabled");
-  }
   console.log(`[ready] Forwarding images to channel ${defaultTargetChannelId}`);
   if (sourceChannelIds.length) {
     console.log(`[ready] Source channel filter: ${sourceChannelIds.join(", ")}`);
   }
+  if (spotify.isConfigured()) {
+    try {
+      await spotify.startCallbackServer({
+        host: spotifyCallbackHost,
+        port: spotifyCallbackPort,
+      });
+      console.log(`[ready] Spotify OAuth callback: ${spotifyRedirectUri}`);
+    } catch (error) {
+      console.error(`[ready] Spotify OAuth callback server failed: ${error.message}`);
+    }
+  } else {
+    console.log("[ready] Spotify history: disabled (missing Spotify environment settings)");
+  }
+  console.log(`[ready] Image generation: ${cloudflareImage.isConfigured()
+    ? `enabled (${CLOUDFLARE_FLUX_MODEL}, ${DEFAULT_IMAGE_DAILY_LIMIT}/user/day)`
+    : "disabled (missing Cloudflare environment settings)"}`);
+  console.log(
+    `[ready] Active image provider: ${activeImageProvider}; ` +
+      `Cloudflare=${cloudflareImage.isConfigured() ? "available" : "disabled"}; ` +
+      `Codex OAuth=${codexImage.isConfigured() ? "available" : "disabled"}`,
+  );
 
   try {
     await registerSlashCommands(readyClient);
     console.log(
-      "[ready] Slash commands registered: /chanel, /channel, /help, /ahoo news, /rate limit, /reset, /status, /context, /ai battle, /model, /summarize, /poll, /remind, /stats, /quotes, /settings",
+      "[ready] Slash commands registered: /chanel, /channel, /help, /ahoo news, /rate limit, /reset, /status, /context, /ai battle, /model, /summarize, /poll, /remind, /stats, /quotes, /image, /spotify, /settings",
     );
     console.log("[ready] Prefix commands: !ank N / !ank status / !ank stop / !gacha");
     startCommunityScheduler();
@@ -1362,6 +2059,10 @@ client.once(Events.ClientReady, async (readyClient) => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isButton()) {
+    if (interaction.customId.startsWith("spotify-history:")) {
+      await handleSpotifyHistoryButton(interaction);
+      return;
+    }
     await handlePollButton(interaction);
     return;
   }
@@ -1412,7 +2113,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.options.getSubcommand() !== "provider") return;
 
-    const provider = interaction.options.getString("name", true);
+    const imageProvider = interaction.options.getString("image");
+    if (imageProvider) {
+      if (!isImageProviderAvailable(imageProvider)) {
+        await interaction.reply({
+          content: `${IMAGE_PROVIDER_LABELS[imageProvider] ?? imageProvider} is not configured on the bot.`,
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        });
+        return;
+      }
+
+      activeImageProvider = saveSelectedImageProvider(imageProviderSelectionPath, imageProvider);
+      console.log(
+        `[config] Image provider changed by user ${interaction.user.id}: provider=${activeImageProvider}`,
+      );
+      await interaction.reply({
+        content: `Image generation provider changed to ${IMAGE_PROVIDER_LABELS[activeImageProvider]}.`,
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
+
+    const provider = interaction.options.getString("name");
+    if (!provider) {
+      await interaction.reply({
+        content: `Current AI provider: ${AI_MODEL_LABELS[activeAiProvider] ?? activeAiProvider}; image provider: ${IMAGE_PROVIDER_LABELS[activeImageProvider] ?? activeImageProvider}.`,
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
     if (!isProviderAvailable(provider)) {
       await interaction.reply({
         content: `${AI_MODEL_LABELS[provider] ?? provider} はBot側で安全に設定されていません。管理者がサーバー環境変数を設定してください。APIキーをDiscordへ投稿しないでください。`,
@@ -1544,13 +2276,60 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  if (interaction.commandName === "spotify") {
+    await handleSpotifyCommand(interaction);
+    return;
+  }
+
+  if (interaction.commandName === "image") {
+    await handleImageCommand(interaction);
+    return;
+  }
+
+  if (interaction.commandName === "balance") {
+    await handleBalanceCommand(interaction);
+    return;
+  }
+
+  if (interaction.commandName === "daily") {
+    await handleDailyCommand(interaction);
+    return;
+  }
+
+  if (interaction.commandName === "work") {
+    await handleWorkCommand(interaction);
+    return;
+  }
+
+  if (interaction.commandName === "quest") {
+    await handleQuestCommand(interaction);
+    return;
+  }
+
+  if (interaction.commandName === "leaderboard") {
+    await handleLeaderboardCommand(interaction);
+    return;
+  }
+
+  if (interaction.commandName === "pay") {
+    await handlePayCommand(interaction);
+    return;
+  }
+
+  if (interaction.commandName === "roulette") {
+    await handleRouletteCommand(interaction);
+    return;
+  }
+
   if (interaction.commandName === "settings") {
-    if (
-      !canChangeAiSettings(interaction.user.id, aiSettingsAllowedUserIds, {
+    const setting = interaction.options.getSubcommand();
+    const canChange = setting === "style"
+      ? canChangeAiStyle(interaction.user.id)
+      : canChangeAiSettings(interaction.user.id, aiSettingsAllowedUserIds, {
         canManageGuild:
           interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false,
-      })
-    ) {
+      });
+    if (!canChange) {
       await interaction.reply({
         content: "AI設定を変更する権限がありません。",
         flags: MessageFlags.Ephemeral,
@@ -1558,7 +2337,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    const setting = interaction.options.getSubcommand();
     const value = interaction.options.getString("value", true);
     const settings = aiSettingsStore.set(
       getAiSettingsKey(interaction),
@@ -1618,6 +2396,65 @@ client.on(Events.MessageCreate, async (message) => {
       userId: message.author.id,
       event: "messages",
     });
+    if (await handleSpotifyTrackLink(message)) return;
+    if (isHakusihikaMentionCommand(message.content, client.user?.id)) {
+      if (!message.reference?.messageId) {
+        await message.reply({
+          content: "白紙に書き込むメッセージに返信しながら `@Bot名 hakusihika` と送ってください。",
+          allowedMentions: { repliedUser: false, parse: [] },
+        });
+        return;
+      }
+
+      try {
+        const repliedMessage = await message.channel.messages.fetch(message.reference.messageId);
+        const botMember = message.guild.members.me;
+        const imageAssets = getImageAssets(repliedMessage).slice(0, 2);
+        const cleanedMessageText = cleanKimazuMessageText(repliedMessage.cleanContent, {
+            botUserId: client.user.id,
+            botNames: [client.user.username, botMember?.displayName],
+          });
+        const messageText =
+          restoreCustomEmojiTokens(cleanedMessageText, repliedMessage.content) ||
+          (imageAssets.length > 0
+            ? ""
+            : repliedMessage.attachments.size > 0
+              ? "画像・ファイル付きメッセージ"
+              : "メッセージなし");
+        const avatarUrl = repliedMessage.author.displayAvatarURL({
+          extension: "png",
+          forceStatic: true,
+          size: 128,
+        });
+        const avatar = await downloadImage(avatarUrl);
+        const media = await downloadHakusihikaAssets(repliedMessage, messageText);
+        const imageInputs = await downloadHakusihikaImages(imageAssets);
+        const image = await createHakusihikaImage({
+          messageText,
+          authorName:
+            repliedMessage.member?.displayName ??
+            repliedMessage.author.globalName ??
+            repliedMessage.author.username,
+          timestamp: repliedMessage.createdAt,
+          avatarInput: avatar,
+          emojiAssets: media.emojiAssets,
+          stickerInputs: media.stickerInputs,
+          imageInputs,
+        });
+        await message.reply({
+          files: [{ attachment: image, name: "hakusihika.png" }],
+          allowedMentions: { repliedUser: false, parse: [] },
+        });
+      } catch (error) {
+        console.error(`[hakusihika] Failed for message ${message.id}:`, error);
+        await message.reply({
+          content: "白紙画像を作れませんでした。少し待ってからもう一度試してください。",
+          allowedMentions: { repliedUser: false, parse: [] },
+        });
+      }
+      return;
+    }
+
     if (isKimazuMentionCommand(message.content, client.user?.id)) {
       if (!message.reference?.messageId) {
         await message.reply({
@@ -1719,6 +2556,7 @@ client.on(Events.Error, (error) => {
 
 process.on("exit", () => {
   communityStore.close();
+  spotify.close();
 });
 
 process.on("unhandledRejection", (error) => {

@@ -15,6 +15,8 @@ test("help lists every user-facing command and automatic feature", () => {
     "/remind",
     "/stats",
     "/quotes",
+    "/image",
+    "/spotify",
     "/settings",
     "/chanel",
     "/channel",
@@ -22,13 +24,20 @@ test("help lists every user-facing command and automatic feature", () => {
     "/reset",
     "/context",
     "/model",
+    "/balance",
+    "/daily",
+    "/work",
+    "/quest",
+    "/leaderboard",
+    "/pay",
+    "/roulette",
     "!gacha",
     "!ank",
   ]) {
     assert.match(help, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 
-  assert.equal(HELP_SECTIONS.length, 6);
+  assert.equal(HELP_SECTIONS.length, 8);
   assert.match(help, /Make it a Quote/);
   assert.match(help, /ペルソナ切り替え: pda_founder/);
 });

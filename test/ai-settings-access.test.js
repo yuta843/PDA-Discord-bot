@@ -1,9 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  AI_STYLE_ALLOWED_USER_ID,
   canChangeAiSettings,
+  canChangeAiStyle,
   parseAiSettingsAllowedUserIds,
 } from "../src/ai-settings-access.js";
+
+test("allows AI style changes only for the designated user ID", () => {
+  assert.equal(canChangeAiStyle(AI_STYLE_ALLOWED_USER_ID), true);
+  assert.equal(canChangeAiStyle("111111111111111111"), false);
+  assert.equal(canChangeAiStyle("111111111111111111", { canManageGuild: true }), false);
+  assert.equal(canChangeAiStyle(undefined), false);
+});
 
 test("allows every user when the settings allowlist is empty", () => {
   assert.equal(canChangeAiSettings("123456789012345678", new Set()), true);

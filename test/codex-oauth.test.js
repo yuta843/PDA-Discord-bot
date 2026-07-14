@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   buildCodexPrompt,
+  generateCodexOAuthImage,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING_EFFORT,
   generateCodexOAuthShortReply,
@@ -66,4 +69,23 @@ test("downloads only an image and passes its temporary path to Codex", async () 
   assert.equal(receivedImagePaths.length, 1);
   assert.match(receivedImagePaths[0], /image-1\.png$/);
   assert.equal(reply, "image reply");
+});
+
+test("enables Codex image generation and returns the generated file", async () => {
+  const generatedImagesDirectory = mkdtempSync(join(tmpdir(), "miq-codex-generated-"));
+  let options;
+  const image = await generateCodexOAuthImage("a blue cat", {
+    generatedImagesDirectory,
+    runCodexImpl: async (prompt, receivedOptions) => {
+      options = receivedOptions;
+      assert.match(prompt, /^\$imagegen/m);
+      writeFileSync(join(generatedImagesDirectory, "generated.png"), "png-bytes");
+      writeFileSync(receivedOptions.outputPath, "generated", "utf8");
+    },
+  });
+  assert.deepEqual(image, Buffer.from("png-bytes"));
+  assert.equal(options.enableImageGeneration, true);
+  assert.equal(options.allowWebSearch, false);
+  assert.deepEqual(options.disableFeatures, ["shell_tool", "browser_use", "browser_use_external", "computer_use"]);
+  assert.equal(existsSync(join(generatedImagesDirectory, "generated.png")), false);
 });

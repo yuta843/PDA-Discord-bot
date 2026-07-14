@@ -224,3 +224,41 @@ test("passes the trusted application task to the selected provider", async () =>
 
   assert.equal(receivedTaskInstruction, "Only perform the server-defined task.");
 });
+
+test("runs the AI output safety reviewer before returning a reply", async () => {
+  const tracker = new GeminiUsageTracker();
+  let reviewedText;
+
+  const result = await generateAiReply("test", {
+    geminiApiKey: "gemini",
+    tracker,
+    geminiGenerator: async () => "review me",
+    outputSafetyReviewer: async (text) => {
+      reviewedText = text;
+      return { allowed: true, category: null };
+    },
+  });
+
+  assert.equal(result.text, "review me");
+  assert.equal(reviewedText, "review me");
+  assert.equal(tracker.getRateLimitStatus().used, 1);
+});
+
+test("does not return a reply when the AI output reviewer blocks it", async () => {
+  const tracker = new GeminiUsageTracker();
+
+  await assert.rejects(
+    generateAiReply("test", {
+      geminiApiKey: "gemini",
+      tracker,
+      geminiGenerator: async () => "candidate",
+      outputSafetyReviewer: async () => ({
+        allowed: false,
+        category: "illegal_activity",
+      }),
+    }),
+    (error) =>
+      error.code === "UNSAFE_AI_OUTPUT" &&
+      error.category === "illegal_activity",
+  );
+});

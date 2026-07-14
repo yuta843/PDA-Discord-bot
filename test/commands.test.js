@@ -42,7 +42,16 @@ test("registers rate limit and reset slash commands", () => {
     "remind",
     "stats",
     "quotes",
+    "image",
+    "spotify",
     "settings",
+    "balance",
+    "daily",
+    "work",
+    "quest",
+    "leaderboard",
+    "pay",
+    "roulette",
   ]);
   assert.equal(slashCommands.find((command) => command.name === "rate").options[0].name, "limit");
   assert.deepEqual(
@@ -62,7 +71,28 @@ test("registers rate limit and reset slash commands", () => {
       .choices.map(({ value }) => value),
     ["gemini", "groq", "qwen", "openai"],
   );
+  assert.deepEqual(
+    slashCommands
+      .find((command) => command.name === "model")
+      .toJSON()
+      .options.find((option) => option.name === "provider")
+      .options[1]
+      .choices.map(({ value }) => value),
+    ["cloudflare", "codex"],
+  );
   assert.equal(slashCommands.find((command) => command.name === "summarize").options[0].name, "count");
+  assert.deepEqual(
+    slashCommands.find((command) => command.name === "balance").options.map((option) => option.name),
+    ["user"],
+  );
+  assert.deepEqual(
+    slashCommands.find((command) => command.name === "pay").options.map((option) => option.name),
+    ["user", "amount"],
+  );
+  assert.deepEqual(
+    slashCommands.find((command) => command.name === "roulette").options.map((option) => option.name),
+    ["amount", "choice", "number"],
+  );
   assert.deepEqual(
     slashCommands.find((command) => command.name === "ahoo").options.map((option) => option.name),
     ["news"],
@@ -76,6 +106,14 @@ test("registers rate limit and reset slash commands", () => {
     ["set", "list", "cancel"],
   );
   assert.deepEqual(
+    slashCommands.find((command) => command.name === "spotify").options.map((option) => option.name),
+    ["connect", "history", "status", "disconnect"],
+  );
+  assert.deepEqual(
+    slashCommands.find((command) => command.name === "image").options.map((option) => option.name),
+    ["prompt"],
+  );
+  assert.deepEqual(
     slashCommands.find((command) => command.name === "settings").options.map((option) => option.name),
     ["length", "language", "style"],
   );
@@ -86,7 +124,18 @@ test("registers rate limit and reset slash commands", () => {
       .options.find((option) => option.name === "style")
       .options[0]
       .choices.map(({ value }) => value),
-    ["casual", "polite", "bullet", "cold", "debate", "tease", "jishou", "pda_founder"],
+    [
+      "casual",
+      "polite",
+      "bullet",
+      "cold",
+      "debate",
+      "tease",
+      "jishou",
+      "pda_founder",
+      "safe_debate",
+      "conversation",
+    ],
   );
   assert.equal(
     slashCommands.find((command) => command.name === "settings").toJSON().default_member_permissions,

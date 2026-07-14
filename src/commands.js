@@ -1,6 +1,6 @@
 import { SlashCommandBuilder } from "discord.js";
 import { AI_SETTING_CHOICES } from "./ai-settings.js";
-import { AI_MODEL_CHOICES } from "./model-selection.js";
+import { AI_MODEL_CHOICES, IMAGE_PROVIDER_CHOICES } from "./model-selection.js";
 import {
   MAX_SUMMARY_COUNT,
   MIN_SUMMARY_COUNT,
@@ -15,6 +15,9 @@ import {
   MAX_REMINDER_MINUTES,
   MIN_REMINDER_MINUTES,
 } from "./reminders.js";
+import { MAX_ROULETTE_BET, MAX_TRANSFER_AMOUNT } from "./economy.js";
+import { MAX_HISTORY_LIMIT } from "./spotify.js";
+import { MAX_IMAGE_PROMPT_LENGTH } from "./cloudflare-image.js";
 
 function parseTargetCommand(content) {
   const match = content?.trim().match(/^\.\/(?:chanel|channel)\s+tensousaki(?:\s+(.+))?$/i);
@@ -102,8 +105,15 @@ const modelCommand = new SlashCommandBuilder()
         option
           .setName("name")
           .setDescription("使用するAIプロバイダー")
-          .setRequired(true)
+          .setRequired(false)
           .addChoices(...AI_MODEL_CHOICES),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("image")
+          .setDescription("Image generation provider")
+          .setRequired(false)
+          .addChoices(...IMAGE_PROVIDER_CHOICES),
       ),
   );
 
@@ -245,6 +255,124 @@ const quotesCommand = new SlashCommandBuilder()
       .setRequired(false),
   );
 
+const imageCommand = new SlashCommandBuilder()
+  .setName("image")
+  .setDescription("Generate an image with the free FLUX model")
+  .addStringOption((option) =>
+    option
+      .setName("prompt")
+      .setDescription("Describe the image to generate")
+      .setMaxLength(MAX_IMAGE_PROMPT_LENGTH)
+      .setRequired(true),
+  );
+
+const spotifyCommand = new SlashCommandBuilder()
+  .setName("spotify")
+  .setDescription("Spotifyの再生履歴を連携・表示します")
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("connect")
+      .setDescription("Spotifyアカウントを連携します"),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("history")
+      .setDescription("自分の最近の再生履歴をサーバーに表示します")
+      .addIntegerOption((option) =>
+        option
+          .setName("count")
+          .setDescription("表示件数")
+          .setMinValue(1)
+          .setMaxValue(MAX_HISTORY_LIMIT)
+          .setRequired(false),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("status")
+      .setDescription("Spotifyの連携状態を確認します"),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("disconnect")
+      .setDescription("Spotifyアカウントの連携を解除します"),
+  );
+
+const balanceCommand = new SlashCommandBuilder()
+  .setName("balance")
+  .setDescription("Check a miq coin balance")
+  .addUserOption((option) =>
+    option
+      .setName("user")
+      .setDescription("User to inspect")
+      .setRequired(false),
+  );
+
+const dailyCommand = new SlashCommandBuilder()
+  .setName("daily")
+  .setDescription("Claim your daily miq coins");
+
+const workCommand = new SlashCommandBuilder()
+  .setName("work")
+  .setDescription("Work for a random miq coin reward");
+
+const questCommand = new SlashCommandBuilder()
+  .setName("quest")
+  .setDescription("View and claim daily quests");
+
+const leaderboardCommand = new SlashCommandBuilder()
+  .setName("leaderboard")
+  .setDescription("Show the miq coin leaderboard");
+
+const payCommand = new SlashCommandBuilder()
+  .setName("pay")
+  .setDescription("Send miq coins to another user")
+  .addUserOption((option) =>
+    option
+      .setName("user")
+      .setDescription("User to pay")
+      .setRequired(true),
+  )
+  .addIntegerOption((option) =>
+    option
+      .setName("amount")
+      .setDescription("Amount of miq coins")
+      .setMinValue(1)
+      .setMaxValue(MAX_TRANSFER_AMOUNT)
+      .setRequired(true),
+  );
+
+const rouletteCommand = new SlashCommandBuilder()
+  .setName("roulette")
+  .setDescription("Bet miq coins on a roulette spin")
+  .addIntegerOption((option) =>
+    option
+      .setName("amount")
+      .setDescription("Amount to bet")
+      .setMinValue(1)
+      .setMaxValue(MAX_ROULETTE_BET)
+      .setRequired(true),
+  )
+  .addStringOption((option) =>
+    option
+      .setName("choice")
+      .setDescription("red, black, or number")
+      .setRequired(true)
+      .addChoices(
+        { name: "Red", value: "red" },
+        { name: "Black", value: "black" },
+        { name: "Number", value: "number" },
+      ),
+  )
+  .addIntegerOption((option) =>
+    option
+      .setName("number")
+      .setDescription("Number from 0 to 36 when choice is number")
+      .setMinValue(0)
+      .setMaxValue(36)
+      .setRequired(false),
+  );
+
 const settingsCommand = new SlashCommandBuilder()
   .setName("settings")
   // Explicitly clear an older administrator-only registration on Discord.
@@ -302,7 +430,16 @@ const slashCommands = [
   remindCommand,
   statsCommand,
   quotesCommand,
+  imageCommand,
+  spotifyCommand,
   settingsCommand,
+  balanceCommand,
+  dailyCommand,
+  workCommand,
+  questCommand,
+  leaderboardCommand,
+  payCommand,
+  rouletteCommand,
 ];
 
 export {
