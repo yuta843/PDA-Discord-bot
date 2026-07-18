@@ -1,0 +1,72 @@
+name: Deploy Discord bot to Oracle Cloud
+
+on:
+  push:
+    branches:
+      - agent/pda-discord-bot-pr
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oracle-discord-bot-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      APP_DIR: /home/ubuntu/PDA-Discord-bot
+      DEPLOY_BRANCH: ${{ github.ref_name }}
+    steps:
+      - name: Deploy over SSH
+        env:
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_PORT: ${{ secrets.ORACLE_PORT }}
+          ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+          ORACLE_KNOWN_HOSTS: ${{ secrets.ORACLE_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : "${ORACLE_HOST:?Missing GitHub Secret ORACLE_HOST}"
+          : "${ORACLE_USER:?Missing GitHub Secret ORACLE_USER}"
+          : "${ORACLE_SSH_KEY:?Missing GitHub Secret ORACLE_SSH_KEY}"
+
+          ORACLE_PORT="${ORACLE_PORT:-22}"
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$ORACLE_SSH_KEY" > "$HOME/.ssh/oracle_deploy_key"
+          chmod 600 "$HOME/.ssh/oracle_deploy_key"
+
+          if [[ -n "${ORACLE_KNOWN_HOSTS:-}" ]]; then
+            printf '%s\n' "$ORACLE_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          else
+            ssh-keyscan -p "$ORACLE_PORT" -H "$ORACLE_HOST" > "$HOME/.ssh/known_hosts"
+          fi
+          chmod 644 "$HOME/.ssh/known_hosts"
+
+          ssh \
+            -i "$HOME/.ssh/oracle_deploy_key" \
+            -p "$ORACLE_PORT" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$ORACLE_USER@$ORACLE_HOST" \
+            "APP_DIR='$APP_DIR' DEPLOY_BRANCH='$DEPLOY_BRANCH' bash -se" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+          cd "$APP_DIR"
+          git fetch origin "$DEPLOY_BRANCH"
+
+          if git show-ref --verify --quiet "refs/heads/$DEPLOY_BRANCH"; then
+            git checkout "$DEPLOY_BRANCH"
+          else
+            git checkout -b "$DEPLOY_BRANCH" --track "origin/$DEPLOY_BRANCH"
+          fi
+
+          git merge --ff-only "origin/$DEPLOY_BRANCH"
+          npm ci --omit=dev
+          sudo -n systemctl restart miq-isou
+          sudo -n systemctl is-active miq-isou
+          REMOTE_SCRIPT

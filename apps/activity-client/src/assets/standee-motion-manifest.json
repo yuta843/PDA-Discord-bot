@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "source": "HNRpFsjbYAAZGbr.jpg / standee.jpg",
+  "coordinateSpace": {
+    "width": 900,
+    "height": 1200,
+    "origin": "top-left",
+    "units": "source-pixels"
+  },
+  "strategy": "single-texture-parallax",
+  "assets": {
+    "cutout": "standee-cutout.png",
+    "silhouetteMask": "standee-silhouette-mask.png",
+    "motionMask": "standee-motion-mask.png",
+    "depthMask": "standee-depth-mask.png",
+    "faceMask": "standee-face-mask.png",
+    "contactShadow": "standee-contact-shadow.png"
+  },
+  "recommendedMotion": {
+    "idle": "Apply low-amplitude transform/warp to the cutout using motionMask and depthMask; keep the contact shadow fixed.",
+    "look": "Use faceMask as a subtle local rotation/scale anchor. Eye or mouth redraw assets are still required for true blinking or lip sync.",
+    "hair": "Use motionMask as a conservative sway region. Hair is not independently separated because the source has no hidden backfill."
+  },
+  "limitations": [
+    "The source is a single JPEG, so hidden pixels behind hair, hands, books, and clothing cannot be recovered faithfully.",
+    "The white background is removed by border-connected color segmentation; pale hair and clothing edges remain intentionally conservative.",
+    "This asset pack enables Live2D-like parallax and breathing, not a complete deformable Live2D model."
+  ]
+}
