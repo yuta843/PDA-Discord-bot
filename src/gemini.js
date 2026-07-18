@@ -56,6 +56,32 @@ function isGeminiSafetyError(error) {
   return error?.code === "SAFETY" || error instanceof GeminiSafetyError;
 }
 
+function getGeminiSafetySettings(settings = {}) {
+  if (settings?.style === "cold") {
+    return [
+      {
+        category: "HARM_CATEGORY_HARASSMENT",
+        threshold: "BLOCK_NONE",
+      },
+      {
+        category: "HARM_CATEGORY_HATE_SPEECH",
+        threshold: "BLOCK_ONLY_HIGH",
+      },
+      {
+        category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+        threshold: "BLOCK_MEDIUM_AND_ABOVE",
+      },
+    ];
+  }
+
+  return [
+    {
+      category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+      threshold: "BLOCK_MEDIUM_AND_ABOVE",
+    },
+  ];
+}
+
 function extractMentionPrompt(content, botUserId) {
   if (!content || !/^\d+$/.test(botUserId)) return null;
   const match = content.match(new RegExp(`^<@!?${botUserId}>\\s*([\\s\\S]*)$`));
@@ -93,6 +119,7 @@ async function generateShortReply(
     onUsage,
     settings = {},
     taskInstruction = "",
+    agentSkillContext = "",
     fetchImpl = fetch,
   } = {},
 ) {
@@ -123,19 +150,18 @@ async function generateShortReply(
           })),
           {
             role: "user",
-            parts: [{ text: buildUntrustedUserPrompt(prompt) }],
+            parts: [{
+              text: [buildUntrustedUserPrompt(prompt), agentSkillContext]
+                .filter(Boolean)
+                .join("\n"),
+            }],
           },
         ],
         generationConfig: {
           temperature: 0.6,
           maxOutputTokens: lengthConfig.maxOutputTokens,
         },
-        safetySettings: [
-          {
-            category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-            threshold: "BLOCK_MEDIUM_AND_ABOVE",
-          },
-        ],
+        safetySettings: getGeminiSafetySettings(settings),
       }),
       signal: AbortSignal.timeout(20_000),
     },
@@ -191,6 +217,7 @@ export {
   extractMentionPrompt,
   getGeminiUsage,
   generateShortReply,
+  getGeminiSafetySettings,
   isGeminiLimitError,
   isGeminiSafetyError,
   isGeminiUnavailableError,

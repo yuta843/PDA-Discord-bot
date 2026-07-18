@@ -1,4 +1,4 @@
-import { SlashCommandBuilder } from "discord.js";
+import { ChannelType, SlashCommandBuilder } from "discord.js";
 import { AI_SETTING_CHOICES } from "./ai-settings.js";
 import { AI_MODEL_CHOICES, IMAGE_PROVIDER_CHOICES } from "./model-selection.js";
 import {
@@ -18,6 +18,7 @@ import {
 import { MAX_ROULETTE_BET, MAX_TRANSFER_AMOUNT } from "./economy.js";
 import { MAX_HISTORY_LIMIT } from "./spotify.js";
 import { MAX_IMAGE_PROMPT_LENGTH } from "./cloudflare-image.js";
+import { CODEX_AGENT_MAX_PROMPT_LENGTH } from "./codex-agent.js";
 
 function parseTargetCommand(content) {
   const match = content?.trim().match(/^\.\/(?:chanel|channel)\s+tensousaki(?:\s+(.+))?$/i);
@@ -55,6 +56,23 @@ function createTargetCommand(name) {
 
 const targetCommands = [createTargetCommand("chanel"), createTargetCommand("channel")];
 
+const relayCommand = new SlashCommandBuilder()
+  .setName("relay")
+  .setDescription("Configure the relay destination channel")
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("channel")
+      .setDescription("Set the channel that receives relayed images")
+      .addStringOption((option) =>
+        option
+          .setName("channel_id")
+          .setDescription("Discord destination channel ID")
+          .setMinLength(17)
+          .setMaxLength(20)
+          .setRequired(true),
+      ),
+  );
+
 const ahooCommand = new SlashCommandBuilder()
   .setName("ahoo")
   .setDescription("AIで架空のコンテンツを作成します")
@@ -84,7 +102,13 @@ const rateCommand = new SlashCommandBuilder()
 
 const resetCommand = new SlashCommandBuilder()
   .setName("reset")
-  .setDescription("AIの会話コンテキストをリセットします");
+  .setDescription("AI会話またはX追跡をリセットします")
+  .addSubcommand((subcommand) =>
+    subcommand.setName("ai").setDescription("このチャンネルのAI会話コンテキストを消去します"),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand.setName("x").setDescription("このチャンネルのX追跡をすべて停止します"),
+  );
 
 const statusCommand = new SlashCommandBuilder()
   .setName("status")
@@ -93,6 +117,17 @@ const statusCommand = new SlashCommandBuilder()
 const contextCommand = new SlashCommandBuilder()
   .setName("context")
   .setDescription("保持中のAIコンテキストを確認します");
+
+const agentCommand = new SlashCommandBuilder()
+  .setName("agent")
+  .setDescription("Run a bounded Codex agent for a Discord task")
+  .addStringOption((option) =>
+    option
+      .setName("task")
+      .setDescription("The task for the bounded agent")
+      .setMaxLength(CODEX_AGENT_MAX_PROMPT_LENGTH)
+      .setRequired(true),
+  );
 
 const modelCommand = new SlashCommandBuilder()
   .setName("model")
@@ -125,10 +160,92 @@ const aiCommand = new SlashCommandBuilder()
       .setName("battle")
       .setDescription("指定Botとの討論を操作します")
       .addSubcommand((subcommand) =>
-        subcommand.setName("st").setDescription("指定Botへメンションして討論を開始します"),
+        subcommand
+          .setName("st")
+          .setDescription("AI同士のレスバ実験を開始します")
+          .addStringOption((option) =>
+            option.setName("topic").setDescription("レスバの議題（省略時は自由議題）").setMaxLength(200),
+          )
+          .addIntegerOption((option) =>
+            option
+              .setName("max_turns")
+              .setDescription("最大応答ターン数（2〜50、既定20）")
+              .setMinValue(2)
+              .setMaxValue(50),
+          ),
       )
       .addSubcommand((subcommand) =>
         subcommand.setName("stop").setDescription("このチャンネルの討論を停止します"),
+      ),
+  );
+
+const resCommand = new SlashCommandBuilder()
+  .setName("res")
+  .setDescription("指定Botの発言に応答します")
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("battle")
+      .setDescription("指定Botの最新の発言へ強くしっかり反論します"),
+  );
+
+const stopCommand = new SlashCommandBuilder()
+  .setName("stop")
+  .setDescription("AIの自動返信だけを停止します（/openまで）");
+
+const openCommand = new SlashCommandBuilder()
+  .setName("open")
+  .setDescription("AIの自動返信をすぐに再開します");
+
+const gayCommand = new SlashCommandBuilder()
+  .setName("gay")
+  .setDescription("最近の面白そうな投稿にG A Yと絵文字でリアクションします");
+
+const kitachanCommand = new SlashCommandBuilder()
+  .setName("kitachan")
+  .setDescription("Xでかわいいぼ喜多画像を検索して名言資料へ送ります");
+
+const xSearchCommand = new SlashCommandBuilder()
+  .setName("x-search")
+  .setDescription("Search X and show posts with an AI excerpt")
+  .addStringOption((option) =>
+    option.setName("query").setDescription("Search query (X operators supported)").setMaxLength(500).setRequired(true),
+  )
+  .addIntegerOption((option) =>
+    option.setName("count").setDescription("AIが選ぶ候補の取得件数（1〜20）").setMinValue(1).setMaxValue(20).setRequired(false),
+  )
+  .addStringOption((option) =>
+    option
+      .setName("order")
+      .setDescription("検索結果の並び順")
+      .setRequired(false)
+      .addChoices(
+        { name: "話題順", value: "top" },
+        { name: "新着順", value: "latest" },
+        { name: "メディア", value: "media" },
+      ),
+  );
+
+const xCommand = new SlashCommandBuilder()
+  .setName("x")
+  .setDescription("Track posts from an X account")
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("tuiseki")
+      .setDescription("Check an account every five minutes in this channel")
+      .addStringOption((option) =>
+        option.setName("username").setDescription("X username, such as @example").setMaxLength(16).setRequired(true),
+      ),
+  );
+
+const acCommand = new SlashCommandBuilder()
+  .setName("ac")
+  .setDescription("Xアカウントの投稿本文を取得します")
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("search")
+      .setDescription("指定アカウントの直近3投稿本文をリンクなしで表示します")
+      .addStringOption((option) =>
+        option.setName("username").setDescription("Xユーザー名（@example）").setMaxLength(16).setRequired(true),
       ),
   );
 
@@ -257,13 +374,71 @@ const quotesCommand = new SlashCommandBuilder()
 
 const imageCommand = new SlashCommandBuilder()
   .setName("image")
-  .setDescription("Generate an image with the free FLUX model")
+  .setDescription("Generate an image (designated Discord user only)")
   .addStringOption((option) =>
     option
       .setName("prompt")
       .setDescription("Describe the image to generate")
       .setMaxLength(MAX_IMAGE_PROMPT_LENGTH)
       .setRequired(true),
+  );
+
+const memoryCommand = new SlashCommandBuilder()
+  .setName("memory")
+  .setDescription("Manage saved memories")
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("remember")
+      .setDescription("Save a memory")
+      .addStringOption((option) =>
+        option
+          .setName("text")
+          .setDescription("Memory text to save")
+          .setRequired(true),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand.setName("list").setDescription("List saved memories"),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("forget")
+      .setDescription("Delete a saved memory")
+      .addStringOption((option) =>
+        option
+          .setName("id")
+          .setDescription("Memory ID to delete")
+          .setRequired(true),
+      ),
+  );
+
+const skillCommand = new SlashCommandBuilder()
+  .setName("skill")
+  .setDescription("Manage reusable agent skills")
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("save")
+      .setDescription("Save or update a reusable skill")
+      .addStringOption((option) =>
+        option.setName("name").setDescription("Skill name").setMaxLength(64).setRequired(true),
+      )
+      .addStringOption((option) =>
+        option.setName("instruction").setDescription("Reusable workflow steps").setMaxLength(2_000).setRequired(true),
+      )
+      .addStringOption((option) =>
+        option.setName("description").setDescription("When this skill is useful").setMaxLength(240).setRequired(false),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand.setName("list").setDescription("List saved agent skills"),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("delete")
+      .setDescription("Delete a saved agent skill")
+      .addStringOption((option) =>
+        option.setName("id").setDescription("Skill ID or name").setRequired(true),
+      ),
   );
 
 const spotifyCommand = new SlashCommandBuilder()
@@ -297,6 +472,10 @@ const spotifyCommand = new SlashCommandBuilder()
       .setName("disconnect")
       .setDescription("Spotifyアカウントの連携を解除します"),
   );
+
+const verifyCommand = new SlashCommandBuilder()
+  .setName("verify")
+  .setDescription("Post the X verification panel or start your verification");
 
 const balanceCommand = new SlashCommandBuilder()
   .setName("balance")
@@ -409,21 +588,57 @@ const settingsCommand = new SlashCommandBuilder()
       .addStringOption((option) =>
         option
           .setName("value")
-          .setDescription("カジュアル・丁寧・箇条書き・冷笑・レスバ・煽り・自称名探偵構文・pda_founder")
+          .setDescription("カジュアル・丁寧・箇条書き・冷笑・レスバ・煽り・自称名探偵構文・pda_founder・壇上十和・安全な討論・会話・プラナ口調・まぐろmode")
           .setRequired(true)
           .addChoices(...AI_SETTING_CHOICES.style),
       ),
   );
 
+const vcCommand = new SlashCommandBuilder()
+  .setName("vc")
+  .setDescription("Join or leave a voice channel and talk with the AI")
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("join")
+      .setDescription("Join your current voice channel and listen for speech"),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("leave")
+      .setDescription("Leave the voice channel and stop voice processing"),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("channel")
+      .setDescription("Use one text channel as the VC conversation input")
+      .addChannelOption((option) =>
+        option
+          .setName("text_channel")
+          .setDescription("Text channel whose messages should be answered in VC")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(true),
+      ),
+  );
+
 const slashCommands = [
   ...targetCommands,
+  relayCommand,
   helpCommand,
   ahooCommand,
   rateCommand,
   resetCommand,
   statusCommand,
   contextCommand,
+  agentCommand,
   aiCommand,
+  resCommand,
+  stopCommand,
+  openCommand,
+  gayCommand,
+  kitachanCommand,
+  xSearchCommand,
+  xCommand,
+  acCommand,
   modelCommand,
   summarizeCommand,
   pollCommand,
@@ -431,7 +646,10 @@ const slashCommands = [
   statsCommand,
   quotesCommand,
   imageCommand,
+  memoryCommand,
+  skillCommand,
   spotifyCommand,
+  verifyCommand,
   settingsCommand,
   balanceCommand,
   dailyCommand,
@@ -440,12 +658,14 @@ const slashCommands = [
   leaderboardCommand,
   payCommand,
   rouletteCommand,
+  vcCommand,
 ];
 
 export {
   extractChannelId,
   normalizeChannelQuery,
   parseTargetCommand,
+  relayCommand,
   slashCommands,
   targetCommands,
 };

@@ -72,7 +72,7 @@ function createEmptyWallet() {
   };
 }
 
-function normalizeWallet(value) {
+function normalizeWallet(value, dateKey = getDateKey()) {
   const wallet = createEmptyWallet();
   if (!value || typeof value !== "object") return wallet;
 
@@ -88,7 +88,7 @@ function normalizeWallet(value) {
     const timestamp = Number(value[key]);
     if (Number.isSafeInteger(timestamp) && timestamp > 0) wallet[key] = timestamp;
   }
-  wallet.dailyProgress = normalizeDailyProgress(value.dailyProgress);
+  wallet.dailyProgress = normalizeDailyProgress(value.dailyProgress, dateKey);
   return wallet;
 }
 
@@ -302,13 +302,14 @@ class CommunityStore {
     return (this.data.quotes[guildId] ?? []).slice(-safeCount).reverse().map(clone);
   }
 
-  ensureWallet(guildId, userId) {
+  ensureWallet(guildId, userId, dateKey = getDateKey()) {
     if (!guildId || !userId) throw new Error("guildId and userId are required.");
     this.data.economy[guildId] ??= { users: {}, transactions: [] };
     this.data.economy[guildId].users ??= {};
     this.data.economy[guildId].transactions ??= [];
     this.data.economy[guildId].users[userId] = normalizeWallet(
       this.data.economy[guildId].users[userId],
+      dateKey,
     );
     return this.data.economy[guildId].users[userId];
   }
@@ -365,7 +366,7 @@ class CommunityStore {
       return { ok: false, reason: "duplicate", wallet: this.getWallet(guildId, userId) };
     }
 
-    const wallet = this.ensureWallet(guildId, userId);
+    const wallet = this.ensureWallet(guildId, userId, getDateKey(now));
     if (safeAmount < 0 && wallet.balance < Math.abs(safeAmount)) {
       return { ok: false, reason: "insufficient_funds", wallet: clone(wallet) };
     }
@@ -390,14 +391,14 @@ class CommunityStore {
   }
 
   claimDaily({ guildId, userId, now = Date.now(), randomInt } = {}) {
-    const wallet = this.ensureWallet(guildId, userId);
+    const today = getDateKey(now);
+    const wallet = this.ensureWallet(guildId, userId, today);
     const lastDailyAt = Number(wallet.lastDailyAt) || 0;
     const retryAfterMs = Math.max(lastDailyAt + DAILY_COOLDOWN_MS - now, 0);
     if (retryAfterMs > 0) {
       return { ok: false, reason: "cooldown", retryAfterMs, wallet: clone(wallet) };
     }
 
-    const today = getDateKey(now);
     const previousDate = lastDailyAt > 0 ? getDateKey(lastDailyAt) : null;
     const streak = previousDate && previousDate === getPreviousDateKey(today)
       ? Math.min(wallet.dailyStreak + 1, 7)
@@ -414,7 +415,7 @@ class CommunityStore {
     });
     if (!result.ok) return result;
 
-    const currentWallet = this.ensureWallet(guildId, userId);
+    const currentWallet = this.ensureWallet(guildId, userId, today);
     currentWallet.dailyStreak = streak;
     currentWallet.lastDailyAt = now;
     currentWallet.dailyProgress = normalizeDailyProgress(currentWallet.dailyProgress, today);
@@ -429,7 +430,8 @@ class CommunityStore {
   }
 
   claimWork({ guildId, userId, now = Date.now(), randomInt } = {}) {
-    const wallet = this.ensureWallet(guildId, userId);
+    const today = getDateKey(now);
+    const wallet = this.ensureWallet(guildId, userId, today);
     const lastWorkAt = Number(wallet.lastWorkAt) || 0;
     const retryAfterMs = Math.max(lastWorkAt + WORK_COOLDOWN_MS - now, 0);
     if (retryAfterMs > 0) {
@@ -448,8 +450,7 @@ class CommunityStore {
     });
     if (!result.ok) return result;
 
-    const currentWallet = this.ensureWallet(guildId, userId);
-    const today = getDateKey(now);
+    const currentWallet = this.ensureWallet(guildId, userId, today);
     currentWallet.lastWorkAt = now;
     currentWallet.dailyProgress = normalizeDailyProgress(currentWallet.dailyProgress, today);
     currentWallet.dailyProgress.work += 1;
@@ -464,8 +465,8 @@ class CommunityStore {
 
   recordEconomyActivity({ guildId, userId, activity, now = Date.now() } = {}) {
     if (!["pollVotes", "ankWins"].includes(activity)) return false;
-    const wallet = this.ensureWallet(guildId, userId);
     const today = getDateKey(now);
+    const wallet = this.ensureWallet(guildId, userId, today);
     wallet.dailyProgress = normalizeDailyProgress(wallet.dailyProgress, today);
     wallet.dailyProgress[activity] += 1;
     this.markDirty();
@@ -482,8 +483,8 @@ class CommunityStore {
   }
 
   claimDailyQuests({ guildId, userId, now = Date.now() } = {}) {
-    const wallet = this.ensureWallet(guildId, userId);
     const dateKey = getDateKey(now);
+    const wallet = this.ensureWallet(guildId, userId, dateKey);
     wallet.dailyProgress = normalizeDailyProgress(wallet.dailyProgress, dateKey);
     const tasks = getDailyQuestStatus(wallet.dailyProgress, dateKey);
     const awards = [];
@@ -522,8 +523,9 @@ class CommunityStore {
       return { ok: false, reason: "duplicate" };
     }
 
-    const sender = this.ensureWallet(guildId, fromUserId);
-    const recipient = this.ensureWallet(guildId, toUserId);
+    const dateKey = getDateKey(now);
+    const sender = this.ensureWallet(guildId, fromUserId, dateKey);
+    const recipient = this.ensureWallet(guildId, toUserId, dateKey);
     if (sender.balance < safeAmount) {
       return { ok: false, reason: "insufficient_funds", wallet: clone(sender) };
     }
@@ -568,7 +570,7 @@ class CommunityStore {
     if (this.findEconomyTransaction(transactionId)) {
       return { ok: false, reason: "duplicate" };
     }
-    const wallet = this.ensureWallet(guildId, userId);
+    const wallet = this.ensureWallet(guildId, userId, getDateKey(now));
     const roulette = resolveRoulette({ amount, choice, number, randomInt });
     if (wallet.balance < roulette.amount) {
       return { ok: false, reason: "insufficient_funds", wallet: clone(wallet) };

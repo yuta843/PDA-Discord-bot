@@ -23,6 +23,14 @@ function isHakusihikaMentionCommand(content, botUserId) {
   return new RegExp(`^<@!?${escapedId}>\\s+hakusihika\\s*$`, "i").test(content?.trim() ?? "");
 }
 
+function shouldHandleImageMention(content, author, botUserId) {
+  if (!author?.id || author.id === botUserId) return false;
+  return (
+    isKimazuMentionCommand(content, botUserId) ||
+    isHakusihikaMentionCommand(content, botUserId)
+  );
+}
+
 function isAllowedDiscordAssetUrl(url) {
   try {
     const parsed = new URL(url);
@@ -153,6 +161,28 @@ function wrapMessageText(text, maxCharacters = 17, maxLines = 3) {
   return lines;
 }
 
+function chooseKimazuTextLayout(messageText, boxWidth, maxBoxHeight) {
+  const characterCount = Math.max(1, [...String(messageText ?? "").replace(/\s/g, "")].length);
+  for (let fontSize = 30; fontSize >= 16; fontSize -= 2) {
+    const lineHeight = Math.round(fontSize * 1.35);
+    const maxCharacters = Math.max(6, Math.floor((boxWidth - 32) / (fontSize * 0.9)));
+    const maxLines = Math.max(1, Math.min(6, Math.floor((maxBoxHeight - 28) / lineHeight)));
+    if (characterCount <= maxCharacters * maxLines) {
+      return {
+        fontSize,
+        lineHeight,
+        lines: wrapMessageText(messageText, maxCharacters, maxLines),
+      };
+    }
+  }
+
+  const fontSize = 16;
+  const lineHeight = Math.round(fontSize * 1.35);
+  const maxCharacters = Math.max(6, Math.floor((boxWidth - 32) / (fontSize * 0.9)));
+  const maxLines = Math.max(1, Math.min(6, Math.floor((maxBoxHeight - 28) / lineHeight)));
+  return { fontSize, lineHeight, lines: wrapMessageText(messageText, maxCharacters, maxLines) };
+}
+
 async function createKimazuImage(avatarInput, { templateInput, messageText = "" } = {}) {
   const template = templateInput ?? (await readFile(templateUrl));
   const metadata = await sharp(template).metadata();
@@ -180,19 +210,20 @@ async function createKimazuImage(avatarInput, { templateInput, messageText = "" 
     .composite([{ input: circle, blend: "dest-in" }])
     .png()
     .toBuffer();
-  const textLines = wrapMessageText(messageText, 14, 6);
   const boxWidth = Math.round(width * 0.34);
-  const boxHeight = 28 + textLines.length * 27;
   const boxX = Math.round(width * 0.018);
-  const boxY = Math.min(height - boxHeight - 12, y + avatarSize + 12);
+  const preferredBoxY = y + avatarSize + 12;
+  const textLayout = chooseKimazuTextLayout(messageText, boxWidth, height - preferredBoxY - 12);
+  const boxHeight = 28 + textLayout.lines.length * textLayout.lineHeight;
+  const boxY = Math.min(height - boxHeight - 12, preferredBoxY);
   const textOverlay = Buffer.from(
     `<svg width="${width}" height="${height}">` +
       `<rect x="${boxX}" y="${boxY}" width="${boxWidth}" height="${boxHeight}" rx="16" ` +
         `fill="white" fill-opacity="0.88" stroke="#333" stroke-opacity="0.2" stroke-width="2"/>` +
       `<text x="${boxX + 16}" y="${boxY + 27}" font-family="Noto Sans JP, Yu Gothic, Meiryo, sans-serif" ` +
-        `font-size="20" font-weight="600" fill="#202124">` +
-        textLines.map((line, index) =>
-          `<tspan x="${boxX + 16}" dy="${index === 0 ? 0 : 27}">${escapeXml(line)}</tspan>`,
+        `font-size="${textLayout.fontSize}" font-weight="700" fill="#202124">` +
+        textLayout.lines.map((line, index) =>
+          `<tspan x="${boxX + 16}" dy="${index === 0 ? 0 : textLayout.lineHeight}">${escapeXml(line)}</tspan>`,
         ).join("") +
       `</text>` +
     `</svg>`,
@@ -305,6 +336,25 @@ function wrapDiscordVisualTokens(tokens, maxWidth, fontSize, maxLines) {
   return visible;
 }
 
+function chooseHakusihikaBodyLayout(tokens, maxWidth, maxHeight, drawingScale = 1) {
+  for (let baseFontSize = 28; baseFontSize >= 14; baseFontSize -= 2) {
+    const fontSize = baseFontSize * drawingScale;
+    const lineHeight = fontSize * 1.88;
+    const maxLines = Math.max(1, Math.floor(maxHeight / lineHeight));
+    const lines = wrapDiscordVisualTokens(tokens, maxWidth, fontSize, Number.MAX_SAFE_INTEGER);
+    if (lines.length <= maxLines) return { fontSize, lineHeight, lines };
+  }
+
+  const fontSize = 14 * drawingScale;
+  const lineHeight = fontSize * 1.88;
+  const maxLines = Math.max(1, Math.floor(maxHeight / lineHeight));
+  return {
+    fontSize,
+    lineHeight,
+    lines: wrapDiscordVisualTokens(tokens, maxWidth, fontSize, maxLines),
+  };
+}
+
 async function toPngDataUri(input) {
   const png = await sharp(input).png().toBuffer();
   return `data:image/png;base64,${png.toString("base64")}`;
@@ -358,23 +408,29 @@ async function createHakusihikaImage({
   ].join(" ");
 
   const drawingScale = Math.min(scaleX, scaleY);
-  const bodyFontSize = 19 * drawingScale;
-  const emojiSize = bodyFontSize * 1.8;
-  const lineHeight = Math.max(bodyFontSize * 1.3, emojiSize * 1.04);
   const bodyX = 18 * scaleX;
   const bodyY = 151 * scaleY;
   const contentWidth = 302 * scaleX;
   const contentHeight = paper.bottomLeft.y - bodyY - 18 * scaleY;
-  const maxLines = Math.max(3, Math.floor(contentHeight / lineHeight));
   const rawMessageText = String(messageText ?? "").trim();
   const placeholderText = new Set(["メッセージなし", "画像・ファイル付きメッセージ"]);
   const mediaOnly = imageInputs.length > 0 && (!rawMessageText || placeholderText.has(rawMessageText));
   const stickerOnly = imageInputs.length === 0 && stickerInputs.length === 1 && (!rawMessageText || placeholderText.has(rawMessageText));
   const displayMessage = mediaOnly || stickerOnly ? "" : rawMessageText || "メッセージなし";
   const visualTokens = createDiscordVisualTokens(displayMessage, emojiAssets);
-  const textLines = displayMessage
-    ? wrapDiscordVisualTokens(visualTokens, contentWidth, bodyFontSize, maxLines)
-    : [];
+  const textHeight = imageInputs.length || stickerInputs.length
+    ? Math.min(contentHeight, 88 * scaleY)
+    : contentHeight;
+  const bodyLayout = chooseHakusihikaBodyLayout(
+    visualTokens,
+    contentWidth,
+    textHeight,
+    drawingScale,
+  );
+  const bodyFontSize = bodyLayout.fontSize;
+  const lineHeight = bodyLayout.lineHeight;
+  const emojiSize = bodyFontSize * 1.8;
+  const textLines = displayMessage ? bodyLayout.lines : [];
   const emojiDataUris = new Map();
   for (const token of visualTokens.filter((item) => item.type === "emoji")) {
     if (emojiDataUris.has(token.token)) continue;
@@ -410,7 +466,7 @@ async function createHakusihikaImage({
       if (!textRun) return;
       bodyParts.push(
         `<text x="${textRunX}" y="${y}" font-family="Segoe UI Emoji, Noto Color Emoji, Yu Gothic, Meiryo, sans-serif" ` +
-          `font-size="${bodyFontSize}" fill="#36322e">${escapeXml(textRun)}</text>`,
+          `font-size="${bodyFontSize}" font-weight="700" fill="#36322e">${escapeXml(textRun)}</text>`,
       );
       textRun = "";
     };
@@ -546,6 +602,8 @@ async function downloadImage(url, fetchImpl = fetch) {
 export {
   createHakusihikaImage,
   createKimazuImage,
+  chooseHakusihikaBodyLayout,
+  chooseKimazuTextLayout,
   cleanKimazuMessageText,
   downloadHakusihikaAssets,
   downloadHakusihikaImages,
@@ -557,5 +615,6 @@ export {
   restoreCustomEmojiTokens,
   isHakusihikaMentionCommand,
   isKimazuMentionCommand,
+  shouldHandleImageMention,
   wrapMessageText,
 };

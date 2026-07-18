@@ -25,6 +25,7 @@ async function generateGroqShortReply(
     history = [],
     settings = {},
     taskInstruction = "",
+    agentSkillContext = "",
     fetchImpl = fetch,
   } = {},
 ) {
@@ -38,7 +39,12 @@ async function generateGroqShortReply(
       content: buildAiSystemInstruction(settings, { taskInstruction }),
     },
     ...buildUntrustedHistory(history),
-    { role: "user", content: buildUntrustedUserPrompt(prompt) },
+    {
+      role: "user",
+      content: [buildUntrustedUserPrompt(prompt), agentSkillContext]
+        .filter(Boolean)
+        .join("\n"),
+    },
   ];
 
   const requestCompletion = async (maxCompletionTokens) => {

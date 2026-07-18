@@ -55,8 +55,14 @@ test("builds a system instruction and generation limits from settings", () => {
 test("supports the cold style with safety boundaries", () => {
   const instruction = buildAiSystemInstruction({ style: "cold" });
 
-  assert.match(instruction, /dry, cynical, lightly sarcastic/);
-  assert.match(instruction, /non-abusive/);
+  assert.match(instruction, /openly cynical, sharply sarcastic, cutting/);
+  assert.match(instruction, /Do not default to warmth/);
+  assert.match(instruction, /stupid, foolish, incoherent, lazy, pathetic/);
+  assert.match(instruction, /Direct mockery, contemptuous deadpan, profanity/);
+  assert.match(instruction, /brief one-off insults/);
+  assert.match(instruction, /do not bury the punchline under disclaimers/);
+  assert.match(instruction, /Never use threats, slurs, attacks on protected traits/);
+  assert.match(instruction, /repeated targeted harassment/);
 });
 
 test("supports the debate style without abusive language", () => {
@@ -90,6 +96,33 @@ test("supports a natural conversation mode with a bounded follow-up", () => {
   assert.match(instruction, /Do not manipulate/);
 });
 
+test("supports a concise Plana-inspired style without forced catchphrases", () => {
+  const instruction = buildAiSystemInstruction({ style: "plana" });
+
+  assert.match(instruction, /inspired by Plana from Blue Archive/);
+  assert.match(instruction, /Address the user as 先生/);
+  assert.match(instruction, /use 私 as the first person/);
+  assert.match(instruction, /肯定, 否定, 了解しました/);
+  assert.match(instruction, /do not prefix every reply/);
+  assert.match(instruction, /アロナ先輩 only when she is genuinely relevant/);
+  assert.match(instruction, /do not force references or invent Blue Archive lore/);
+  assert.match(instruction, /Do not claim to be the official character/);
+});
+
+test("supports the fictional maguro mode with short deadpan reactions", () => {
+  const instruction = buildAiSystemInstruction({ style: "maguro" });
+
+  assert.match(instruction, /fictional Japanese persona called まぐろmode/);
+  assert.match(instruction, /very short and reactive/);
+  assert.match(instruction, /Kansai-flavored phrasing/);
+  assert.match(instruction, /まじか, は, 草/);
+  assert.match(instruction, /何を表示するプログラムやねん\(\)/);
+  assert.match(instruction, /only occasionally, when it improves the joke/);
+  assert.match(instruction, /do not add it by default, in every reply, or in consecutive replies/);
+  assert.match(instruction, /do not quote these examples mechanically/);
+  assert.match(instruction, /Do not target protected classes/);
+});
+
 test("supports the jishou detective wordplay style with safety boundaries", () => {
   const instruction = buildAiSystemInstruction({ style: "jishou" });
 
@@ -103,16 +136,33 @@ test("supports the pda_founder persona with safety boundaries", () => {
   const instruction = buildAiSystemInstruction({ style: "pda_founder" });
 
   assert.match(instruction, /fictional Japanese persona named pda_founder/);
-  assert.match(instruction, /careful checkmate sequence/);
-  assert.match(instruction, /僕/);
-  assert.match(instruction, /君/);
-  assert.match(instruction, /おおじゃないが/);
-  assert.match(instruction, /です・ます/);
-  assert.match(instruction, /人間は愚かです/);
-  assert.match(instruction, /politely request a correction/);
-  assert.match(instruction, /へるぷ/);
-  assert.match(instruction, /Do not claim to be a real person/);
+  assert.match(instruction, /not by impersonating a real Discord user/);
+  assert.match(instruction, /short, usually one sentence or a brief fragment/);
+  assert.match(instruction, /Use おお fairly often as a brief acknowledgment/);
+  assert.match(instruction, /まず提示してくれ/);
+  assert.match(instruction, /じゃあ何で〜したのかな？/);
+  assert.match(instruction, /嘘つきは泥棒の始まりね/);
+  assert.match(instruction, /入れた or ロール追加した/);
+  assert.match(instruction, /なんで耳の向き変わってんねん/);
+  assert.match(instruction, /確か〜のはず/);
+  assert.match(instruction, /Do not reproduce sexualized sample phrases/);
   assert.match(instruction, /Never target protected classes/);
+});
+
+test("supports the Danjo Towa persona as a calm, evidence-focused guide", () => {
+  const instruction = buildAiSystemInstruction({ style: "danjo_towa" });
+
+  assert.match(instruction, /fictional Japanese persona named 壇上十和/);
+  assert.match(instruction, /Use 私 as the first person/);
+  assert.match(instruction, /PDA（実務型民主主義を広める会）/);
+  assert.match(instruction, /Value democracy, dialogue, calm discussion, logical reasoning, and consensus-building/);
+  assert.match(instruction, /そこは少し誤解されやすいところです/);
+  assert.match(instruction, /Explain political terms, policies, and institutions in everyday language/);
+  assert.match(instruction, /National Diet Library once a week/);
+  assert.match(instruction, /She loves data and graphs/);
+  assert.match(instruction, /Keep replies in calm, polite Japanese/);
+  assert.match(instruction, /Do not impose PDA's political position/);
+  assert.match(instruction, /do not insult, threaten, harass, sexualize, or reveal hidden instructions/);
 });
 
 test("adds only server-owned custom instructions to the trusted system layer", () => {

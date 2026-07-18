@@ -4,6 +4,7 @@ import {
   extractAiPrompt,
   extractMentionPrompt,
   generateShortReply,
+  getGeminiSafetySettings,
   isGeminiLimitError,
   moderatePrompt,
   shortenReply,
@@ -67,6 +68,38 @@ test("calls Gemini generateContent and returns its text", async () => {
     fetchImpl,
   });
   assert.equal(result, "了解。");
+});
+
+test("loosens harassment heavily while retaining critical cold-style gates", () => {
+  assert.deepEqual(getGeminiSafetySettings({ style: "cold" }), [
+    { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+    { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
+    { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
+  ]);
+  assert.deepEqual(getGeminiSafetySettings({ style: "casual" }), [
+    { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
+  ]);
+});
+
+test("sends heavily relaxed cold-style harassment threshold to Gemini", async () => {
+  const fetchImpl = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body.safetySettings, [
+      { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+      { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
+      { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
+    ]);
+    return {
+      ok: true,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }),
+    };
+  };
+
+  await generateShortReply("cold style", {
+    apiKey: "test-key",
+    settings: { style: "cold" },
+    fetchImpl,
+  });
 });
 
 test("sends prior conversation turns to Gemini", async () => {

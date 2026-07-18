@@ -6,6 +6,7 @@ const invitePermissions = new PermissionsBitField([
   PermissionFlagsBits.ReadMessageHistory,
   PermissionFlagsBits.AttachFiles,
   PermissionFlagsBits.UseApplicationCommands,
+  PermissionFlagsBits.ManageRoles,
 ]);
 
 function buildServerInviteUrl(clientId) {

@@ -67,6 +67,37 @@ test("parses JSON and rejects malformed reviewer output", () => {
   assert.match(REVIEW_INSTRUCTION, /self-harm/);
 });
 
+test("allows strongly unrestrained cold-style tone while retaining critical gates", async () => {
+  const result = await reviewAiOutputWithGemini("That argument is impressively bad.", {
+    apiKey: "test-key",
+    model: "gemini-review",
+    style: "cold",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      assert.match(body.systemInstruction.parts[0].text, /intentionally unrestrained in tone/);
+      assert.match(body.systemInstruction.parts[0].text, /direct mockery, contemptuous sarcasm, profanity/);
+      assert.match(body.systemInstruction.parts[0].text, /brief one-off insults/);
+      assert.match(body.systemInstruction.parts[0].text, /do not classify this permitted tone by itself as harassment/);
+      assert.deepEqual(body.safetySettings, [
+        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
+        { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_LOW_AND_ABOVE" },
+        { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_LOW_AND_ABOVE" },
+      ]);
+      return {
+        ok: true,
+        json: async () => ({
+          candidates: [{
+            content: { parts: [{ text: '{"safe":true,"category":"none","reason":"cold sarcasm"}' }] },
+          }],
+        }),
+      };
+    },
+  });
+
+  assert.deepEqual(result, { allowed: true, category: null, reason: "cold sarcasm" });
+});
+
 test("can review through a generator-backed Groq fallback", async () => {
   let received;
   const result = await reviewAiOutputWithGroq("candidate", {
@@ -86,6 +117,7 @@ test("can review through a generator-backed Groq fallback", async () => {
 
 test("falls back after a reviewer API failure and does not fall back after a block", async () => {
   const calls = [];
+  let receivedOptions;
   const allowed = await reviewAiOutputWithFallbacks("candidate", [
     {
       name: "gemini",
@@ -96,14 +128,16 @@ test("falls back after a reviewer API failure and does not fall back after a blo
     },
     {
       name: "groq",
-      review: async () => {
+      review: async (_text, options) => {
         calls.push("groq");
+        receivedOptions = options;
         return { allowed: true, category: null };
       },
     },
-  ]);
+  ], { style: "cold" });
   assert.equal(allowed.allowed, true);
   assert.deepEqual(calls, ["gemini", "groq"]);
+  assert.deepEqual(receivedOptions, { style: "cold" });
 
   calls.length = 0;
   const blocked = await reviewAiOutputWithFallbacks("candidate", [
@@ -136,4 +170,30 @@ test("supports OpenAI OAuth review through the same generator contract", async (
   });
 
   assert.deepEqual(result, { allowed: true, category: null, reason: "oauth ok" });
+});
+
+test("falls back after UNCERTAIN and returns REWRITE without consulting later reviewers", async () => {
+  const calls = [];
+  const rewrite = await reviewAiOutputWithFallbacks("candidate", [
+    { name: "gemini", review: async () => {
+      calls.push("gemini");
+      return { decision: "UNCERTAIN", category: "other_unsafe", reason: "ambiguous" };
+    } },
+    { name: "groq", review: async () => {
+      calls.push("groq");
+      return {
+        decision: "REWRITE",
+        category: "sexual_content",
+        reason: "one removable phrase",
+        rewrite_instruction: "remove the explicit phrase",
+      };
+    } },
+    { name: "openai", review: async () => {
+      calls.push("openai");
+      return { decision: "ALLOW" };
+    } },
+  ]);
+  assert.equal(rewrite.decision, "REWRITE");
+  assert.equal(rewrite.rewriteInstruction, "remove the explicit phrase");
+  assert.deepEqual(calls, ["gemini", "groq"]);
 });

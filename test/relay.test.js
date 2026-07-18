@@ -124,6 +124,65 @@ test("can forward an attachment whose content type is missing", () => {
   assert.equal(result[0].url, "https://cdn.discordapp.com/attachments/1/2/quote");
 });
 
+test("can forward a Discord attachment reported as octet-stream", () => {
+  const candidate = message({
+      attachments: new Map([
+        ["1", {
+          url: "https://cdn.discordapp.com/attachments/1/2/quote",
+          name: "quote",
+          contentType: "application/octet-stream",
+        }],
+      ]),
+    });
+  const result = getImageAssets(
+    candidate,
+    { includeUnknownAttachments: true },
+  );
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].url, "https://cdn.discordapp.com/attachments/1/2/quote");
+  assert.equal(shouldRelay(candidate, { quoteBotId: "quote-bot" }), true);
+});
+
+test("keeps the octet-stream fallback scoped to attachments while retaining embeds", () => {
+  const attachmentUrl = "https://cdn.discordapp.com/attachments/1/2/quote";
+  const embedUrl = "https://media.discordapp.net/attachments/1/2/quote.png";
+  const candidate = message({
+    attachments: new Map([
+      ["1", {
+        url: attachmentUrl,
+        name: "quote",
+        contentType: "application/octet-stream",
+      }],
+    ]),
+    embeds: [{ image: { url: embedUrl } }],
+  });
+
+  assert.deepEqual(getImageAssets(candidate), [{ url: embedUrl, name: "quote.png" }]);
+  assert.deepEqual(
+    getImageAssets(candidate, { includeUnknownAttachments: true }),
+    [
+      { url: attachmentUrl, name: "quote" },
+      { url: embedUrl, name: "quote.png" },
+    ],
+  );
+});
+
+test("does not let a non-image content type masquerade as an image by filename", () => {
+  const candidate = message({
+    attachments: new Map([
+      ["1", {
+        url: "https://cdn.discordapp.com/attachments/1/2/not-an-image.png",
+        name: "not-an-image.png",
+        contentType: "application/pdf",
+      }],
+    ]),
+  });
+
+  assert.deepEqual(getImageAssets(candidate, { includeUnknownAttachments: true }), []);
+  assert.equal(shouldRelay(candidate, { quoteBotId: "quote-bot" }), false);
+});
+
 test("rejects non-Discord, insecure, and lookalike asset URLs", () => {
   const result = getImageAssets(
     message({

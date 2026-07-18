@@ -1,4 +1,5 @@
 const IMAGE_CONTENT_TYPE = /^image\//i;
+const OCTET_STREAM_CONTENT_TYPE = "application/octet-stream";
 const IMAGE_EXTENSION = /\.(?:png|jpe?g|gif|webp|avif|bmp|tiff?)$/i;
 const URL_PATTERN = /https?:\/\/[^\s<>]+/gi;
 const ALLOWED_DISCORD_ASSET_HOSTS = new Set([
@@ -31,19 +32,29 @@ function cleanFileName(name) {
   return cleaned || null;
 }
 
+function normalizeContentType(contentType) {
+  return String(contentType ?? "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+}
+
 function isImageAttachment(attachment) {
   if (!attachment?.url || !isAllowedDiscordAssetUrl(attachment.url)) return false;
-  if (attachment.contentType && IMAGE_CONTENT_TYPE.test(attachment.contentType)) {
-    return true;
+  const contentType = normalizeContentType(attachment.contentType);
+  if (contentType) {
+    if (IMAGE_CONTENT_TYPE.test(contentType)) return true;
+    if (contentType !== OCTET_STREAM_CONTENT_TYPE) return false;
   }
   return IMAGE_EXTENSION.test(attachment.name ?? attachment.url.split("?")[0]);
 }
 
 function isUnknownAttachment(attachment) {
+  const contentType = normalizeContentType(attachment?.contentType);
   if (
     !attachment?.url ||
     !isAllowedDiscordAssetUrl(attachment.url) ||
-    attachment.contentType ||
+    (contentType && contentType !== OCTET_STREAM_CONTENT_TYPE) ||
     isImageAttachment(attachment)
   ) {
     return false;

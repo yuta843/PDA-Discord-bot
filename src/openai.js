@@ -38,6 +38,7 @@ async function generateOpenAiShortReply(
     history = [],
     settings = {},
     taskInstruction = "",
+    agentSkillContext = "",
     fetchImpl = fetch,
   } = {},
 ) {
@@ -45,7 +46,12 @@ async function generateOpenAiShortReply(
   const lengthConfig = getAiLengthConfig(settings);
   const input = [
     ...buildUntrustedHistory(history),
-    { role: "user", content: buildUntrustedUserPrompt(prompt) },
+    {
+      role: "user",
+      content: [buildUntrustedUserPrompt(prompt), agentSkillContext]
+        .filter(Boolean)
+        .join("\n"),
+    },
   ];
 
   const requestResponse = async (maxOutputTokens) => {

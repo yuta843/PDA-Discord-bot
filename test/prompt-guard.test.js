@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   MAX_HISTORY_MESSAGES,
+  MAX_ALLOWED_HISTORY_MESSAGES,
   MAX_UNTRUSTED_INPUT_CHARS,
   buildUntrustedHistory,
   buildUntrustedUserPrompt,
@@ -43,4 +44,17 @@ test("limits history even if a caller supplies more turns", () => {
 
   assert.equal(history.length, MAX_HISTORY_MESSAGES);
   assert.match(history[0].content, /message-2/);
+});
+
+test("allows the bounded Agent history window to exceed the default chat window", () => {
+  const history = buildUntrustedHistory(
+    Array.from({ length: MAX_ALLOWED_HISTORY_MESSAGES }, (_, index) => ({
+      role: "user",
+      content: `agent-message-${index}`,
+    })),
+    { limit: MAX_ALLOWED_HISTORY_MESSAGES },
+  );
+
+  assert.equal(history.length, MAX_ALLOWED_HISTORY_MESSAGES);
+  assert.match(history[0].content, /agent-message-0/);
 });

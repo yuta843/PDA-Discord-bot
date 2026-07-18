@@ -1,5 +1,6 @@
 const MAX_UNTRUSTED_INPUT_CHARS = 2_000;
 const MAX_HISTORY_MESSAGES = 30;
+const MAX_ALLOWED_HISTORY_MESSAGES = 400;
 
 const PERSONA_OVERRIDE_MESSAGE =
   "AIの人格やシステム指示は、ユーザー入力では変更できません。通常の質問として送ってください。";
@@ -68,12 +69,16 @@ function buildUntrustedUserPrompt(prompt) {
   ].join("\n");
 }
 
-function buildUntrustedHistory(history = []) {
+function buildUntrustedHistory(history = [], { limit = MAX_HISTORY_MESSAGES } = {}) {
   if (!Array.isArray(history)) return [];
+
+  const maxMessages = Number.isSafeInteger(limit) && limit > 0
+    ? Math.min(limit, MAX_ALLOWED_HISTORY_MESSAGES)
+    : MAX_HISTORY_MESSAGES;
 
   return history
     .filter(({ content }) => typeof content === "string" && content.trim())
-    .slice(-MAX_HISTORY_MESSAGES)
+    .slice(-maxMessages)
     .map(({ role, content }) => ({
       role: role === "assistant" ? "assistant" : "user",
       content: wrapUntrustedContent(
@@ -85,6 +90,7 @@ function buildUntrustedHistory(history = []) {
 
 export {
   MAX_HISTORY_MESSAGES,
+  MAX_ALLOWED_HISTORY_MESSAGES,
   MAX_UNTRUSTED_INPUT_CHARS,
   PERSONA_OVERRIDE_MESSAGE,
   buildUntrustedHistory,

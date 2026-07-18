@@ -21,7 +21,7 @@ cd /home/ubuntu/PDA-Discord-bot
 git status
 ```
 
-Node.js は 18.17 以上が必要です。Oracle VM では Node.js 22 系を推奨します。
+Node.js は 22.12 以上が必要です。Oracle VM では Node.js 22 系を使用してください。
 
 ```bash
 node -v

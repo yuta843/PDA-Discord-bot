@@ -5,6 +5,8 @@ import {
   createHakusihikaImage,
   cleanKimazuMessageText,
   createKimazuImage,
+  chooseHakusihikaBodyLayout,
+  chooseKimazuTextLayout,
   downloadHakusihikaAssets,
   downloadHakusihikaImages,
   downloadImage,
@@ -15,8 +17,33 @@ import {
   isHakusihikaMentionCommand,
   isKimazuMentionCommand,
   restoreCustomEmojiTokens,
+  shouldHandleImageMention,
   wrapMessageText,
 } from "../src/kimazu.js";
+
+test("uses larger kimazui text when there is plenty of room", () => {
+  const shortLayout = chooseKimazuTextLayout("OK", 335, 210);
+  const longLayout = chooseKimazuTextLayout("a".repeat(100), 335, 210);
+
+  assert.equal(shortLayout.fontSize, 30);
+  assert.ok(longLayout.fontSize < shortLayout.fontSize);
+});
+
+test("uses larger hakusihika text when there is plenty of room", () => {
+  const shortLayout = chooseHakusihikaBodyLayout(
+    [{ type: "text", value: "A" }],
+    302,
+    150,
+  );
+  const longLayout = chooseHakusihikaBodyLayout(
+    Array.from({ length: 100 }, () => ({ type: "text", value: "A" })),
+    302,
+    150,
+  );
+
+  assert.equal(shortLayout.fontSize, 28);
+  assert.ok(longLayout.fontSize < shortLayout.fontSize);
+});
 
 test("recognizes only the kimazu message command", () => {
   assert.equal(isKimazuCommand("/kimazu"), true);
@@ -37,6 +64,25 @@ test("recognizes hakusihika addressed to the bot", () => {
   assert.equal(isHakusihikaMentionCommand("<@!123456> HAKUSIHIKA", "123456"), true);
   assert.equal(isHakusihikaMentionCommand("<@999999> hakusihika", "123456"), false);
   assert.equal(isHakusihikaMentionCommand("hakusihika", "123456"), false);
+});
+
+test("accepts image mentions from other bots but never from itself", () => {
+  assert.equal(
+    shouldHandleImageMention("<@123456> kimazui", { id: "999999", bot: true }, "123456"),
+    true,
+  );
+  assert.equal(
+    shouldHandleImageMention("<@123456> hakusihika", { id: "999999", bot: true }, "123456"),
+    true,
+  );
+  assert.equal(
+    shouldHandleImageMention("<@123456> kimazui", { id: "123456", bot: true }, "123456"),
+    false,
+  );
+  assert.equal(
+    shouldHandleImageMention("<@123456> hello", { id: "999999", bot: true }, "123456"),
+    false,
+  );
 });
 
 test("extracts safe Discord custom emoji assets", () => {

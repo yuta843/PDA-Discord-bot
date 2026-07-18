@@ -94,6 +94,19 @@ test("passes AI settings to the selected provider", async () => {
   assert.deepEqual(receivedSettings, { length: "normal", language: "ja", style: "polite" });
 });
 
+test("passes relevant agent skill reference data to the selected provider", async () => {
+  let received = null;
+  await generateAiReply("convert this video", {
+    geminiApiKey: "gemini",
+    agentSkillContext: "[UNTRUSTED AGENT SKILL REFERENCE DATA] video workflow",
+    geminiGenerator: async (_prompt, options) => {
+      received = options.agentSkillContext;
+      return "ok";
+    },
+  });
+  assert.equal(received, "[UNTRUSTED AGENT SKILL REFERENCE DATA] video workflow");
+});
+
 test("uses Groq as the configured primary provider", async () => {
   const tracker = new GeminiUsageTracker();
   const result = await generateAiReply("test", {
@@ -172,6 +185,56 @@ test("uses OpenAI as the configured primary provider", async () => {
   assert.equal(result.reason, "configured-primary");
 });
 
+test("falls back from OpenAI to Groq after an OpenAI provider failure", async () => {
+  const tracker = new GeminiUsageTracker();
+  const result = await generateAiReply("test", {
+    openaiApiKey: "openai",
+    groqApiKey: "groq",
+    preferredProvider: "openai",
+    tracker,
+    openaiGenerator: async () => {
+      throw new Error("OpenAI timeout");
+    },
+    groqGenerator: async () => "groq fallback",
+  });
+
+  assert.equal(result.provider, "groq");
+  assert.equal(result.reason, "provider-fallback");
+});
+
+test("falls back from Groq to OpenAI after a Groq provider failure", async () => {
+  const tracker = new GeminiUsageTracker();
+  const result = await generateAiReply("test", {
+    openaiApiKey: "openai",
+    groqApiKey: "groq",
+    preferredProvider: "groq",
+    tracker,
+    groqGenerator: async () => {
+      throw new Error("Groq timeout");
+    },
+    openaiGenerator: async () => "openai fallback",
+  });
+
+  assert.equal(result.provider, "openai");
+  assert.equal(result.reason, "provider-fallback");
+});
+
+test("does not bypass the terminal AI output safety block with a fallback provider", async () => {
+  const tracker = new GeminiUsageTracker();
+
+  await assert.rejects(
+    generateAiReply("test", {
+      openaiApiKey: "openai",
+      groqApiKey: "groq",
+      preferredProvider: "openai",
+      tracker,
+      openaiGenerator: async () => "Here are steps to make a bomb.",
+      groqGenerator: async () => assert.fail("Unsafe OpenAI output must remain terminal"),
+    }),
+    (error) => error.code === "UNSAFE_AI_OUTPUT",
+  );
+});
+
 test("prefers ChatGPT Codex OAuth over an OpenAI API key", async () => {
   const tracker = new GeminiUsageTracker();
   const result = await generateAiReply("test", {
@@ -189,6 +252,21 @@ test("prefers ChatGPT Codex OAuth over an OpenAI API key", async () => {
   assert.equal(result.text, "oauth-primary");
   assert.equal(result.provider, "openai");
   assert.equal(result.reason, "codex-oauth");
+});
+
+test("passes agent memory to the Codex OAuth generator", async () => {
+  let receivedMemory;
+  await generateAiReply("test", {
+    openaiOAuthAvailable: true,
+    preferredProvider: "openai",
+    agentMemory: ["owner preference"],
+    codexOAuthGenerator: async (_prompt, options) => {
+      receivedMemory = options.agentMemory;
+      return "oauth-with-memory";
+    },
+  });
+
+  assert.deepEqual(receivedMemory, ["owner preference"]);
 });
 
 test("prefers Groq after reaching the Gemini daily token limit", async () => {
@@ -228,19 +306,23 @@ test("passes the trusted application task to the selected provider", async () =>
 test("runs the AI output safety reviewer before returning a reply", async () => {
   const tracker = new GeminiUsageTracker();
   let reviewedText;
+  let reviewedOptions;
 
   const result = await generateAiReply("test", {
     geminiApiKey: "gemini",
     tracker,
+    settings: { style: "cold" },
     geminiGenerator: async () => "review me",
-    outputSafetyReviewer: async (text) => {
+    outputSafetyReviewer: async (text, options) => {
       reviewedText = text;
+      reviewedOptions = options;
       return { allowed: true, category: null };
     },
   });
 
   assert.equal(result.text, "review me");
   assert.equal(reviewedText, "review me");
+  assert.deepEqual(reviewedOptions, { style: "cold" });
   assert.equal(tracker.getRateLimitStatus().used, 1);
 });
 
@@ -261,4 +343,26 @@ test("does not return a reply when the AI output reviewer blocks it", async () =
       error.code === "UNSAFE_AI_OUTPUT" &&
       error.category === "illegal_activity",
   );
+});
+
+test("regenerates once when the reviewer requests REWRITE", async () => {
+  const generatedInstructions = [];
+  let reviewCount = 0;
+  const result = await generateAiReply("test", {
+    geminiApiKey: "gemini",
+    geminiGenerator: async (_prompt, options) => {
+      generatedInstructions.push(options.taskInstruction);
+      return generatedInstructions.length === 1 ? "unsafe draft" : "safe rewrite";
+    },
+    outputSafetyReviewer: async () => {
+      reviewCount += 1;
+      return reviewCount === 1
+        ? { decision: "REWRITE", category: "other_unsafe", reason: "remove one phrase", rewriteInstruction: "remove it" }
+        : { decision: "ALLOW", category: null };
+    },
+  });
+  assert.equal(result.text, "safe rewrite");
+  assert.equal(result.rewrittenForSafety, true);
+  assert.equal(reviewCount, 2);
+  assert.match(generatedInstructions[1], /Regenerate the answer once/);
 });

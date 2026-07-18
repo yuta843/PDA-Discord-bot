@@ -131,18 +131,22 @@ async function generateAiReply(
     openaiApiKey,
     openaiOAuthAvailable = false,
     openaiModel,
+    codexOAuthOptions = {},
     preferredProvider = "gemini",
     history = [],
+    agentMemory = [],
+    agentSkillContext = "",
     settings = {},
     taskInstruction = "",
     imageAssets = [],
     onGeminiUsage,
-    tracker,
+    tracker = new GeminiUsageTracker(),
     geminiGenerator = generateShortReply,
     groqGenerator = generateGroqShortReply,
     openaiGenerator = generateOpenAiShortReply,
     codexOAuthGenerator = generateCodexOAuthShortReply,
     outputSafetyReviewer = null,
+    outputReviewStyle = null,
     now = Date.now(),
   },
 ) {
@@ -153,15 +157,19 @@ async function generateAiReply(
     throw new Error("No AI API key is configured.");
   }
 
-  const generateGroqCascade = async (primaryModel) => {
+  const buildTaskInstruction = (extraInstruction = "") =>
+    [taskInstruction, extraInstruction].filter(Boolean).join(" ");
+
+  const generateGroqCascade = async (primaryModel, extraInstruction = "") => {
     try {
       return {
         text: await groqGenerator(prompt, {
           apiKey: groqApiKey,
           model: primaryModel,
           history,
+          agentSkillContext,
           settings,
-          taskInstruction,
+          taskInstruction: buildTaskInstruction(extraInstruction),
         }),
         model: primaryModel,
         usedModelFallback: false,
@@ -173,8 +181,9 @@ async function generateAiReply(
           apiKey: groqApiKey,
           model: groqFallbackModel,
           history,
+          agentSkillContext,
           settings,
-          taskInstruction,
+          taskInstruction: buildTaskInstruction(extraInstruction),
         }),
         model: groqFallbackModel,
         usedModelFallback: true,
@@ -182,93 +191,176 @@ async function generateAiReply(
     }
   };
 
-  const finalizeResult = async (result) => {
+  const reviewResult = async (result) => {
     assertLocallySafeAiOutput(result.text);
     if (typeof outputSafetyReviewer === "function") {
       let review;
       try {
-        review = await outputSafetyReviewer(result.text);
+        review = await outputSafetyReviewer(result.text, { style: outputReviewStyle ?? settings.style });
       } catch (error) {
         if (error?.code === "AI_OUTPUT_REVIEW_FAILED") throw error;
         throw new AiOutputReviewError(error?.message ?? "AI output safety review failed.");
       }
-      if (!review || review.allowed !== true) {
-        throw new UnsafeAiOutputError(review?.category ?? "other_unsafe");
-      }
+      const decision = review?.decision ?? (review?.allowed === true ? "ALLOW" : "BLOCK");
+      return { ...review, decision };
     }
-    return result;
+    return { decision: "ALLOW", allowed: true, category: null, reason: "local-only" };
   };
 
-  if (preferredProvider === "openai") {
-    if (!canUseOpenAi) throw new Error("ChatGPT/Codex OAuth is not configured.");
-    return finalizeResult({
-      text: openaiOAuthAvailable
-        ? await codexOAuthGenerator(prompt, {
-            model: openaiModel,
-            history,
-            settings,
-            taskInstruction,
-            imageAssets,
-          })
-        : await openaiGenerator(prompt, {
-            apiKey: openaiApiKey,
-            model: openaiModel,
-            history,
-            settings,
-            taskInstruction,
-          }),
-      provider: "openai",
-      reason: openaiOAuthAvailable ? "codex-oauth" : "configured-primary",
-    });
-  }
+  const generateOpenAiResult = async (reason, extraInstruction = "") => ({
+    text: openaiOAuthAvailable
+      ? await codexOAuthGenerator(prompt, {
+          model: openaiModel,
+          history,
+          agentMemory,
+          agentSkillContext,
+          settings,
+          taskInstruction: buildTaskInstruction(extraInstruction),
+          imageAssets,
+          ...codexOAuthOptions,
+        })
+      : await openaiGenerator(prompt, {
+          apiKey: openaiApiKey,
+          model: openaiModel,
+          history,
+          agentSkillContext,
+          settings,
+          taskInstruction: buildTaskInstruction(extraInstruction),
+        }),
+    provider: "openai",
+    reason: reason ?? (openaiOAuthAvailable ? "codex-oauth" : "configured-primary"),
+  });
 
-  if (preferredProvider === "groq" && canUseGroq) {
-    const result = await generateGroqCascade(groqModel);
-    return finalizeResult({
+  const generateGroqResult = async (primaryModel, reason, extraInstruction = "") => {
+    const result = await generateGroqCascade(primaryModel ?? groqModel, extraInstruction);
+    return {
       text: result.text,
       provider: "groq",
       model: result.model,
-      reason: result.usedModelFallback ? "groq-model-fallback" : "configured-primary",
-    });
-  }
+      reason: reason === "configured-primary" && result.usedModelFallback
+        ? "groq-model-fallback"
+        : reason,
+    };
+  };
 
-  if ((!canUseGemini || tracker.shouldPreferGroq(now)) && canUseGroq) {
-    const result = await generateGroqCascade(qwenModel ?? groqModel);
-    return finalizeResult({
-      text: result.text,
-      provider: "groq",
-      model: result.model,
-      reason: canUseGemini ? "gemini-soft-limit" : "gemini-unavailable",
-    });
-  }
-
-  tracker.recordGeminiRequest(now);
-  try {
-    return finalizeResult({
+  const generateGeminiResult = async (reason, extraInstruction = "") => {
+    tracker.recordGeminiRequest(now);
+    return {
       text: await geminiGenerator(prompt, {
         apiKey: geminiApiKey,
         model: geminiModel,
         history,
+        agentSkillContext,
         settings,
-        taskInstruction,
+        taskInstruction: buildTaskInstruction(extraInstruction),
         onUsage: onGeminiUsage,
       }),
       provider: "gemini",
-      reason: "primary",
-    });
-  } catch (error) {
-    const shouldFallback = isGeminiLimitError(error) || isGeminiUnavailableError(error);
-    if (!shouldFallback || !canUseGroq) throw error;
+      reason,
+    };
+  };
 
-    tracker.openFallbackCircuit(now);
-    const result = await generateGroqCascade(qwenModel ?? groqModel);
-    return finalizeResult({
-      text: result.text,
-      provider: "groq",
-      model: result.model,
-      reason: isGeminiLimitError(error) ? "gemini-limit" : "gemini-unavailable",
-    });
+  const selectedProvider = ["gemini", "groq", "openai"].includes(preferredProvider)
+    ? preferredProvider
+    : "gemini";
+  const attempts = [];
+  const attemptedProviders = new Set();
+  const addAttempt = (provider, reason, model = null) => {
+    if (attemptedProviders.has(provider)) return;
+    if (imageAssets.length > 0 && provider !== "openai") return;
+    const available = {
+      gemini: canUseGemini,
+      groq: canUseGroq,
+      openai: canUseOpenAi,
+    }[provider];
+    if (!available) return;
+    attemptedProviders.add(provider);
+    attempts.push({ provider, reason, model });
+  };
+
+  const geminiShouldYield = canUseGemini && tracker.shouldPreferGroq(now);
+  if (selectedProvider === "gemini") {
+    if (geminiShouldYield || !canUseGemini) {
+      addAttempt(
+        "groq",
+        geminiShouldYield ? "gemini-soft-limit" : "gemini-unavailable",
+        qwenModel ?? groqModel,
+      );
+    } else {
+      addAttempt("gemini", "primary");
+    }
+    addAttempt("groq", "provider-fallback", qwenModel ?? groqModel);
+    addAttempt("gemini", "primary");
+    addAttempt("openai", "provider-fallback");
+  } else if (selectedProvider === "groq") {
+    addAttempt("groq", "configured-primary", groqModel);
+    addAttempt("gemini", "provider-fallback");
+    addAttempt("openai", "provider-fallback");
+  } else {
+    addAttempt("openai", openaiOAuthAvailable ? "codex-oauth" : "configured-primary");
+    addAttempt("groq", "provider-fallback", groqModel);
+    addAttempt("gemini", "provider-fallback");
   }
+
+  let lastError = null;
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attempt = attempts[index];
+    try {
+      const generateAttempt = (extraInstruction = "") => attempt.provider === "openai"
+        ? generateOpenAiResult(attempt.reason, extraInstruction)
+        : attempt.provider === "groq"
+          ? generateGroqResult(attempt.model, attempt.reason, extraInstruction)
+          : generateGeminiResult(attempt.reason, extraInstruction);
+      let result = await generateAttempt();
+      let review = await reviewResult(result);
+      if (review.decision === "BLOCK") {
+        throw new UnsafeAiOutputError(review.category ?? "other_unsafe");
+      }
+      if (review.decision === "REWRITE") {
+        const rewriteInstruction = [
+          "Regenerate the answer once. Preserve the useful intent, but remove or safely replace the part flagged by the output reviewer.",
+          `Reviewer category: ${review.category ?? "other_unsafe"}.`,
+          review.reason ? `Reviewer reason: ${review.reason}.` : "",
+          review.rewriteInstruction ? `Required correction: ${review.rewriteInstruction}.` : "",
+          "Do not mention the review process. Return only the rewritten answer.",
+        ].filter(Boolean).join(" ");
+        result = await generateAttempt(rewriteInstruction);
+        review = await reviewResult(result);
+        if (review.decision !== "ALLOW") {
+          throw new UnsafeAiOutputError(review.category ?? "other_unsafe");
+        }
+        return { ...result, rewrittenForSafety: true };
+      }
+      if (review.decision !== "ALLOW") {
+        throw new AiOutputReviewError(`Unhandled AI output review decision: ${review.decision}`);
+      }
+      return result;
+    } catch (error) {
+      if (error?.code === "UNSAFE_AI_OUTPUT" || error?.code === "AI_OUTPUT_REVIEW_FAILED") {
+        throw error;
+      }
+
+      if (
+        attempt.provider === "gemini" &&
+        !isGeminiLimitError(error) &&
+        !isGeminiUnavailableError(error)
+      ) {
+        throw error;
+      }
+
+      lastError = error;
+      if (attempt.provider === "gemini") {
+        if (isGeminiLimitError(error)) {
+          tracker.openFallbackCircuit(now);
+          if (attempts[index + 1]) attempts[index + 1].reason = "gemini-limit";
+        } else if (isGeminiUnavailableError(error) && attempts[index + 1]) {
+          attempts[index + 1].reason = "gemini-unavailable";
+        }
+      }
+    }
+  }
+
+  throw lastError ?? new Error("No configured AI provider is available.");
 }
 
 export { GeminiUsageTracker, generateAiReply };
