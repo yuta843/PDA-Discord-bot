@@ -1,5 +1,9 @@
 # Make it a Quote image relay bot
 
+## License
+
+This project is released under the [MIT License](LICENSE).
+
 ## 公開リポジトリの範囲
 
 このリポジトリにはBot本体、Discord Activity、テスト、ドキュメント、サンプル設定、画像・3Dアセットを含めています。APIキー、Bot Token、OAuth Secret、セッションSecret、OAuthトークン、Discordの実行時データは公開しません。
