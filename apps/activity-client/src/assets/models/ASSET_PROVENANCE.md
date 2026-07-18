@@ -10,9 +10,9 @@
 - Derived size: 2,000,084 bytes; 40,000 triangles
 - Processing: `scripts/prepare-stl.py`, using versions pinned in `scripts/requirements-stl.txt`
 - Coordinate assumption: Y-up; dimensions are normalized at runtime
-- Intended use: non-commercial Discord Activity character prototype
+- Asset license: MIT License for the derived asset included in this project
 
-The user supplied the source model. Redistribution rights and the Tripo account/input-asset terms have not been independently verified; confirm them before publishing this asset outside the user's private non-commercial Activity.
+The source model was generated locally by the repository owner using owner-provided source material. The repository owner permits redistribution of this derived asset as part of this project.
 
 ## Front-projection texture
 
